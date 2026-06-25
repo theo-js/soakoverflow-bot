@@ -370,7 +370,8 @@ class GameMap {
         );
     }
 
-    public getNextMoveToTargetFrom({
+    /** Finds the first step on the shortest path from origin to target using a BFS search */
+    public findNextStepOnShortestPath({
         origin,
         target,
         occupiedPositions
@@ -379,32 +380,47 @@ class GameMap {
         target: Coordinates;
         occupiedPositions: Coordinates[];
     }): Coordinates {
-        const dx = target.x - origin.x;
-        const dy = target.y - origin.y;
-        const horizontalMove = { x: origin.x + Math.sign(dx), y: origin.y };
-        const verticalMove = { x: origin.x, y: origin.y + Math.sign(dy) };
+        if (this.isSamePosition(origin, target)) return origin;
 
-        const isBlocked = (position: Coordinates) => {
+        const isWalkable = (position: Coordinates): boolean => {
+            if (this.isSamePosition(position, target)) return true;
             const tile = this.getTileAt(position);
             return (
-                !tile
-                || tile.tileType !== TileType.EMPTY
-                || occupiedPositions.some(pos => this.isSamePosition(pos, position))
+                tile?.tileType === TileType.EMPTY &&
+                !occupiedPositions.some((occ) => this.isSamePosition(occ, position))
             );
         };
 
-        // Target already reached
-        if (dx === 0 && dy === 0) return origin;
+        const queue: Coordinates[] = [origin];
+        const visited = new Set<string>([this.getCoordinatesKey(origin)]);
+        const cameFrom = new Map<string, Coordinates>();
 
-        // Dominant axis has the priority
-        if (Math.abs(dx) >= Math.abs(dy)) {
-            if (dx !== 0 && (this.isSamePosition(horizontalMove, target) || !isBlocked(horizontalMove)))
-                return horizontalMove;
-            if (dy !== 0) return verticalMove;
-        } else {
-            if (dy !== 0 && (this.isSamePosition(verticalMove, target) || !isBlocked(verticalMove)))
-                return verticalMove;
-            if (dx !== 0) return horizontalMove;
+        while (queue.length > 0) {
+            const current = queue.shift()!;
+
+            if (this.isSamePosition(current, target)) {
+                let step = current;
+                let prev = cameFrom.get(this.getCoordinatesKey(step));
+                while (prev && !this.isSamePosition(prev, origin)) {
+                    step = prev;
+                    prev = cameFrom.get(this.getCoordinatesKey(step));
+                }
+                return step;
+            }
+
+            for (const neighbor of [
+                { x: current.x - 1, y: current.y },
+                { x: current.x + 1, y: current.y },
+                { x: current.x,     y: current.y - 1 },
+                { x: current.x,     y: current.y + 1 },
+            ]) {
+                const k = this.getCoordinatesKey(neighbor);
+                if (!visited.has(k) && isWalkable(neighbor)) {
+                    visited.add(k);
+                    cameFrom.set(k, current);
+                    queue.push(neighbor);
+                }
+            }
         }
 
         return origin;
@@ -953,7 +969,7 @@ class Agent {
             occupiedPositions
         });
 
-        return gameMap.getNextMoveToTargetFrom({
+        return gameMap.findNextStepOnShortestPath({
             target: closestCoverAroundTargetPosition,
             origin: this.coordinates,
             occupiedPositions
