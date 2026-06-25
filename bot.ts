@@ -214,6 +214,7 @@ class Game {
     private selectStrategy(): GameStrategy {
         if (
             this.totalEnemyBombs >= 3 && // Baiting only pays off if enemies still have bombs to waste
+            this.gameMap.obstaclesPercentage < 10 && // Current version of baiting is risky on fields filled with obstacles
             this.aliveAlliesPercentage > 2/3 * 100 // Avoid sacrificing too much of the team
         )
             return GameStrategy.BAIT;
@@ -464,6 +465,12 @@ class GameMap {
                 y: Math.round(index * step)
             })
         );
+    }
+
+    public get obstaclesPercentage () {
+        const tiles = [...this.grid.values()];
+        const obstacles = tiles.map(({ tileType }) => tileType !== TileType.EMPTY);
+        return obstacles.length / tiles.length * 100;
     }
 
     // =============================================================================
