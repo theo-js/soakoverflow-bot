@@ -2,7 +2,10 @@
  * Win the water fight by controlling the most territory, or out-soak your opponent!
  **/
 
-// Types
+/**
+ * High-level behavioral strategies used by the bot to adapt its global team behavior
+ * depending on the current game state and opponent dynamics.
+ */
 enum GameStrategy {
     /** Throw weak ally at enemies to lure them & make them waste bombs */
     BAIT = 'bait',
