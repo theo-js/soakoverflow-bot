@@ -287,10 +287,10 @@ class Game {
         this.aliveAllies.forEach((ally) => {
             ally.decideActions({
                 // Pass game data
-                agents: this.aliveAgents,
                 allies: this.aliveAllies,
                 enemies: this.aliveEnemies,
-                gameMap: this.gameMap
+                gameMap: this.gameMap,
+                gameStrategy: this.currentStrategy!
             });
         });
     }
@@ -906,11 +906,13 @@ class Agent {
         gameMap,
         allies,
         enemies,
+        gameStrategy
     }: {
         formationRole: AgentBehaviorPolicy['formationRole'];
         gameMap: GameMap;
         allies: Agent[];
         enemies: Agent[];
+        gameStrategy: GameStrategy
     }): Coordinates {
         let nextMove: Coordinates;
         
@@ -922,13 +924,13 @@ class Agent {
         switch (formationRole) {
             case 'frontline': {
                 // === FRONTLINERS MOVE TOWARDS ENEMIES ===
-                this.actionService.message('Pressing forward');
+                this.actionService.message(`${gameStrategy} - Pressing forward`);
 
                 nextMove = averageEnemiesPosition;
                 break;
             } case 'follower': {
                 // === FOLLOWERS STAY BEHIND FRONTLINE ===
-                this.actionService.message('Watching your back');
+                this.actionService.message(`${gameStrategy} - Watching your back`);
 
                 // Find next move
                 // Add distance behind attackers
@@ -982,14 +984,14 @@ class Agent {
      */
     public decideActions({
         gameMap,
-        agents,
         allies,
-        enemies
+        enemies,
+        gameStrategy
     }: {
         gameMap: GameMap;
-        agents: Agent[];
         allies: Agent[];
         enemies: Agent[];
+        gameStrategy: GameStrategy;
     }): void {
         // === MOVE ACTION ===
         const nextMove = this.getAgentNextMove({
@@ -997,6 +999,7 @@ class Agent {
             gameMap,
             allies,
             enemies,
+            gameStrategy
         });
         this.actionService.move({
             currentPosition: this.coordinates,
