@@ -214,7 +214,7 @@ class Game {
     private selectStrategy(): GameStrategy {
         if (
             this.totalEnemyBombs >= 3 && // Baiting only pays off if enemies still have bombs to waste
-            this.aliveAlliesPercentage > 2/3 // Avoid sacrificing too much of the team
+            this.aliveAlliesPercentage > 2/3 * 100 // Avoid sacrificing too much of the team
         )
             return GameStrategy.BAIT;
 
