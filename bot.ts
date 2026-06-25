@@ -343,31 +343,6 @@ class GameMap {
         return posA.x === posB.x && posA.y === posB.y;
     }
 
-    public getFurthestAvailablePosition({
-        oppositeOf,
-        occupiedPositions
-    }: {
-        /**
-         * The method will look for a position that is the furthest from this position,
-         * and that is not already occupied by an agent or obstacle
-         */
-        oppositeOf: Coordinates;
-        occupiedPositions: Coordinates[];
-    }): Coordinates {
-        return [...this.grid.values()]
-            .filter((tile) =>
-                // Only look for available tiles
-                tile.tileType === TileType.EMPTY
-                && !occupiedPositions.some((position) => this.isSamePosition(position, tile))
-            )
-            .map((tile) => ({
-                tile,
-                distance: this.getManhattanDistance(oppositeOf, tile)
-            }))
-            .sort((a, b) => b.distance - a.distance)
-            [0]?.tile;
-    }
-
     private getManhattanDistance(a: Coordinates, b: Coordinates): number {
         return Math.abs(a.x - b.x) + Math.abs(a.y - b.y);
     }
