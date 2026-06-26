@@ -488,7 +488,7 @@ class GameMap {
 
     public get obstaclesPercentage () {
         const tiles = [...this.grid.values()];
-        const obstacles = tiles.map(({ tileType }) => tileType !== TileType.EMPTY);
+        const obstacles = tiles.filter(({ tileType }) => tileType !== TileType.EMPTY);
         return obstacles.length / tiles.length * 100;
     }
 
