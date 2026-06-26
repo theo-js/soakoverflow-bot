@@ -763,10 +763,24 @@ class GameMap {
                 if (killDiff !== 0)
                     return killDiff;
 
-                // 2. Highest effective damage output (wetness + damage, capped at 100)
-                return (b.enemy.wetness + b.effectiveDamage) - (a.enemy.wetness + a.effectiveDamage);
+                // 2. Among killable targets, remove the biggest bomb threat first
+                if (a.canKill && b.canKill) {
+                    const bombDiff = b.enemy.splashBombs - a.enemy.splashBombs;
+                    if (bombDiff !== 0)
+                        return bombDiff;
+                }
+
+                // 3. Highest damage output
+                const damageOutputDiff =
+                    (b.enemy.wetness + b.effectiveDamage) -
+                    (a.enemy.wetness + a.effectiveDamage);
+                if (damageOutputDiff !== 0)
+                    return damageOutputDiff;
+
+                // 4. Remaining tie-breaker: bomb carriers
+                return b.enemy.splashBombs - a.enemy.splashBombs;
             })
-            [0]?.enemy
+            [0]?.enemy;
     }
 
     // =============================================================================
@@ -804,16 +818,22 @@ class GameMap {
         const targetsInReach = [...this.grid.values()]
             .filter((targetPosition) => this.isBombTargetInReach({ throwerPosition: thrower.coordinates, targetPosition }));
 
-        const ideal = (targetsInReach
+        return targetsInReach
             .map((target) => {
                 const splashZone = this.getSplashZone(target);
 
                 // Count allies and enemies in splash zone
                 let touchedAllies: Agent[] = [];
                 let touchedEnemies: Agent[] = [];
+                let touchedEnemyBombs = 0;
                 splashZone.forEach((tile) => {
                     allies.forEach((ally) => this.isSamePosition(ally.coordinates, tile) && touchedAllies.push(ally));
-                    enemies.forEach((enemy) => this.isSamePosition(enemy.coordinates, tile) && touchedEnemies.push(enemy));
+                    enemies.forEach((enemy) => {
+                        if (this.isSamePosition(enemy.coordinates, tile)) {
+                            touchedEnemies.push(enemy);
+                            touchedEnemyBombs += enemy.splashBombs;
+                        }
+                    });
                 });
 
                 const willWasteBomb = (
@@ -831,6 +851,7 @@ class GameMap {
                     touchedAlliesCount: touchedAllies.length,
                     touchedEnemies: touchedEnemies.map((enemy) => `#${enemy.agentId}; ${enemy.coordinates.x}, ${enemy.coordinates.y}`),
                     touchedEnemiesCount: touchedEnemies.length,
+                    touchedEnemyBombs,
                     killableEnemiesCount: touchedEnemies.filter((enemy) => enemy.wetness >= 70).length,
                     willWasteBomb
                 };
@@ -852,14 +873,17 @@ class GameMap {
                 // Priority 2: kill enemies
                 const killDiff = b.killableEnemiesCount - a.killableEnemiesCount;
                 if (killDiff !== 0)
-                    return killDiff;                
+                    return killDiff; 
+                
+                // Priority 3: remove the highest bomb threat
+                const bombDiff = b.touchedEnemyBombs - a.touchedEnemyBombs;
+                if (bombDiff !== 0)
+                    return bombDiff;
 
                 // Minimize number of touched allies
                 return a.touchedAlliesCount - b.touchedAlliesCount;
             })
-            [0])
-            console.error(`#${thrower.agentId} throwing bomb:`, ideal);
-            return ideal?.target;
+            [0]?.target;
     }
 }
 
