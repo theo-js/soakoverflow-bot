@@ -411,12 +411,7 @@ class GameMap {
                 return step;
             }
 
-            for (const neighbor of [
-                { x: current.x - 1, y: current.y },
-                { x: current.x + 1, y: current.y },
-                { x: current.x,     y: current.y - 1 },
-                { x: current.x,     y: current.y + 1 },
-            ]) {
+            for (const { tile: neighbor } of this.getAdjacentTilesOf(current)) {
                 const k = this.getCoordinatesKey(neighbor);
                 if (!visited.has(k) && isWalkable(neighbor)) {
                     visited.add(k);
