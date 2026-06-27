@@ -499,7 +499,7 @@ class GameMap {
 
     /** Build a map of all existing covers and the total area they protect from */
     private buildCoverMap() {
-        // Find 
+        // Find all obstacles
         const obstacles = [...this.grid.values()].filter((tile) => tile.tileType !== TileType.EMPTY);
 
         // Calculate protection zone for each cover tile
