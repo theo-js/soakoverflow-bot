@@ -1,7 +1,26 @@
 /**
  * Win the water fight by controlling the most territory, or out-soak your opponent!
- **/
+ *
+ * === CHANGELOG (version "Gold") ===
+ * - FIX: bug de tri dans getIdealCoverNearby (protectionDiff jamais utilisé)
+ * - FIX: off-by-one sur la borne width dans le positionnement "follower"
+ * - NEW: rôle "controller" -> des agents dédiés au contrôle de territoire
+ *   (se placent sur la ligne de front médiane, étalés verticalement, au lieu
+ *   de foncer sur l'ennemi ou de reculer bêtement)
+ * - NEW: "frontline" s'arrête à optimalRange de la cible au lieu de foncer
+ *   jusqu'à la position moyenne ennemie (évite de s'exposer inutilement)
+ * - NEW: si un agent est déjà idéalement placé (à portée + sous couverture),
+ *   il ne bouge plus (évite de perdre le bonus de couverture pour rien)
+ * - NEW: meilleure priorisation des cibles de tir (ratio dégâts/cooldown,
+ *   évite l'overkill sur une cible déjà condamnée par un allié)
+ */
 
+enum GameStrategy {
+    /** Throw weak ally at enemies to lure them & make them waste bombs */
+    BAIT = 'bait',
+    /** Focus on killing enemies as quick as possible */
+    FOCUS_FIRE = 'focus-fire'
+}
 
 type Coordinates = { x: number; y: number; };
 
@@ -15,10 +34,25 @@ type AgentStats = {
     soakingPower: number;
     splashBombs: number;
 }
-/** Agent data provided by the input before the game loop */
 type AgentMetaData = AgentIdentity & AgentStats;
 
-/** Data expected by the Agent constructor fn */
+type AgentBehaviorPolicyType = 'riskSeeker' | 'conservativeFollower' | 'conservativeAttacker' | 'territoryController';
+type AgentFormationRole = 'frontline' | 'follower' | 'harass-bomb-owners' | 'controller';
+type AgentBehaviorPolicy = {
+    type: AgentBehaviorPolicyType;
+    formationRole: AgentFormationRole;
+    bombPolicy: {
+        allowFriendlyFire: boolean;
+        requireEnemyCluster: boolean;
+    },
+    coverPolicy: {
+        shouldSearchCover: false;
+    } | {
+        shouldSearchCover: true;
+        coverSearchRadius: number;
+    }
+};
+
 type AgentProps = {
     agentId: number;
     coordinates: Coordinates;
@@ -51,19 +85,16 @@ enum TileType {
 type GameMapGridTile = (Coordinates & { tileType: TileType; });
 type GameMapGrid = Map<string, GameMapGridTile>;
 
-/** Tile that is protected by one or more obstacles */
 type Cover = {
     tile: GameMapGridTile;
     obstacles: CoverObstacle[];
 };
-/** Relationship between a cover tile and the obstacle tile that offers protection */
 type CoverObstacle = {
     coverAt: Direction;
     tile: GameMapGridTile;
     protectedAgainst: Coordinates[]
 }
 
-/** Set of positions under the protection of a certain tile type */
 type ProtectionZone = {
     zone: Coordinates[];
     protectionType: TileType
@@ -79,25 +110,51 @@ enum Direction {
 class Game {
     private readonly myId: number;
     private currentGameTurn = 0;
-    private turnContext: T
     private readonly gameMap: GameMap;
     private readonly allAgentsData = new Map<number, AgentMetaData>;
+    private aliveAgents: Agent[] = [];
+    private currentStrategy: GameStrategy | undefined;
 
-    /** Read input and initialize game data */
+    private readonly AGENT_BEHAVIOR_POLICIES: Record<AgentBehaviorPolicyType, AgentBehaviorPolicy> = {
+        riskSeeker: {
+            type: 'riskSeeker',
+            formationRole: 'harass-bomb-owners',
+            bombPolicy: { allowFriendlyFire: true, requireEnemyCluster: false },
+            coverPolicy: { shouldSearchCover: false }
+        },
+        conservativeFollower: {
+            type: 'conservativeFollower',
+            formationRole: 'follower',
+            bombPolicy: { allowFriendlyFire: false, requireEnemyCluster: true },
+            coverPolicy: { shouldSearchCover: true, coverSearchRadius: 3 }
+        },
+        conservativeAttacker: {
+            type: 'conservativeAttacker',
+            formationRole: 'frontline',
+            bombPolicy: { allowFriendlyFire: false, requireEnemyCluster: false },
+            coverPolicy: { shouldSearchCover: true, coverSearchRadius: 3 }
+        },
+        territoryController: {
+            type: 'territoryController',
+            formationRole: 'controller',
+            bombPolicy: { allowFriendlyFire: false, requireEnemyCluster: true },
+            coverPolicy: { shouldSearchCover: true, coverSearchRadius: 3 }
+        }
+    };
+
     constructor() {
-        this.myId = parseInt(readline()); // Your player id (0 or 1)
+        this.myId = parseInt(readline());
 
-        // Read all agents data
         (() => {
-            const agentsDataCount: number = parseInt(readline()); // Total number of agents in the game
+            const agentsDataCount: number = parseInt(readline());
             for (let i = 0; i < agentsDataCount; i++) {
                 var inputs: string[] = readline().split(' ');
-                const agentId: number = parseInt(inputs[0]); // Unique identifier for this agent
-                const playerId: number = parseInt(inputs[1]); // Player id of this agent
-                const shootCooldown: number = parseInt(inputs[2]); // Number of turns between each of this agent's shots
-                const optimalRange: number = parseInt(inputs[3]); // Maximum manhattan distance for greatest damage output
-                const soakingPower: number = parseInt(inputs[4]); // Damage output within optimal conditions
-                const splashBombs: number = parseInt(inputs[5]); // Number of splash bombs this can throw this game
+                const agentId: number = parseInt(inputs[0]);
+                const playerId: number = parseInt(inputs[1]);
+                const shootCooldown: number = parseInt(inputs[2]);
+                const optimalRange: number = parseInt(inputs[3]);
+                const soakingPower: number = parseInt(inputs[4]);
+                const splashBombs: number = parseInt(inputs[5]);
 
                 this.allAgentsData.set(agentId, {
                     playerId,
@@ -110,7 +167,6 @@ class Game {
             }
         })();
 
-        // Read game map data
         this.gameMap = new GameMap();
     }
 
@@ -130,19 +186,15 @@ class Game {
     private get allyWithLowestStats(): Agent {
         return [...this.aliveAllies]
             .sort((a, b) => {
-                // 1. Fewer bombs = less valuable
                 const bombsDiff = a.splashBombs - b.splashBombs;
                 if (bombsDiff !== 0) return bombsDiff;
 
-                // 2. Lower damage output = less valuable
                 const soakingDiff = a.metaData.soakingPower - b.metaData.soakingPower;
                 if (soakingDiff !== 0) return soakingDiff;
 
-                // 3. Lower range = less valuable
                 const rangeDiff = a.metaData.optimalRange - b.metaData.optimalRange;
                 if (rangeDiff !== 0) return rangeDiff;
 
-                // 4. More injured = less valuable
                 return b.wetness - a.wetness;
             })[0];
     }
@@ -151,21 +203,73 @@ class Game {
         return this.aliveEnemies.reduce((count, { splashBombs }) => count + splashBombs, 0);
     }
 
+    private upsertAgent(agentProps: AgentProps): void {
+        const existingAgent = this.aliveAgents.find(
+            (agent) => agent.agentId === agentProps.agentId
+        );
+
+        if (existingAgent) return existingAgent.update(agentProps);
+
+        const newAgent = new Agent(agentProps);
+        this.aliveAgents.push(newAgent);
+    }
+
+    private selectStrategy(): GameStrategy {
+        if (
+            this.totalEnemyBombs >= 3 &&
+            this.gameMap.obstaclesPercentage < 10 &&
+            this.aliveAlliesPercentage > 2 / 3 * 100
+        )
+            return GameStrategy.BAIT;
+
+        return GameStrategy.FOCUS_FIRE;
+    }
+
+    /**
+     * Assigne les rôles en tenant compte du contrôle de territoire :
+     * on garde toujours 1 à 2 agents dédiés à tenir la ligne médiane
+     * (rôle "controller") plutôt que de tout jeter dans le combat frontal.
+     */
+    private assignBehaviorsForStrategy(strategy: GameStrategy): void {
+        const allies = this.aliveAllies;
+
+        switch (strategy) {
+            case GameStrategy.BAIT:
+            case GameStrategy.FOCUS_FIRE: {
+                allies.forEach((ally, index) => {
+                    // Sur 3 agents ou plus, on garde ~1/3 de l'équipe sur le contrôle
+                    // de territoire pour ne pas sacrifier les points de zone.
+                    const shouldControlTerritory = allies.length >= 3 && index % 3 === 2;
+                    ally.behaviorPolicy = shouldControlTerritory
+                        ? this.AGENT_BEHAVIOR_POLICIES.territoryController
+                        : this.AGENT_BEHAVIOR_POLICIES.conservativeAttacker;
+                });
+                break;
+            }
+            // case GameStrategy.BAIT: {
+            //     allies.forEach((ally) => {
+            //         if (ally.agentId === this.allyWithLowestStats.agentId) ally.behaviorPolicy = this.AGENT_BEHAVIOR_POLICIES.riskSeeker;
+            //         else ally.behaviorPolicy = this.AGENT_BEHAVIOR_POLICIES.conservativeFollower;
+            //     });
+            // }
+        }
+    }
+
     public readTurn() {
-        const aliveAgentsCount: number = parseInt(readline()); // Total number of agents still in the game
+        const aliveAgentsCount: number = parseInt(readline());
         const aliveAgentIdsThisTurn = new Set<number>();
-    
+
         for (let i = 0; i < aliveAgentsCount; i++) {
             var inputs: string[] = readline().split(' ');
             const agentId: number = parseInt(inputs[0]);
             aliveAgentIdsThisTurn.add(agentId);
             const x: number = parseInt(inputs[1]);
             const y: number = parseInt(inputs[2]);
-            const cooldown: number = parseInt(inputs[3]); // Number of turns before this agent can shoot
+            const cooldown: number = parseInt(inputs[3]);
             const splashBombs: number = parseInt(inputs[4]);
-            const wetness: number = parseInt(inputs[5]); // Damage (0-100) this agent has taken
+            const wetness: number = parseInt(inputs[5]);
 
-            const metaData = this.allAgentsData.get(agentId); // Bind agent metadata
+            const metaData = this.allAgentsData.get(agentId);
             if (!metaData) throw new Error(`Unknown agent ${agentId}`);
 
             const agentProps: Omit<AgentProps, 'behavior'> = {
@@ -176,31 +280,26 @@ class Game {
                 wetness,
                 metaData,
             };
-            
-            // Use singleton agents
+
             this.upsertAgent(agentProps);
         }
-        const _myAgentCount: number = parseInt(readline()); // Number of alive agents controlled by you
+        const _myAgentCount: number = parseInt(readline());
 
-        // Remove eliminated agents
         this.aliveAgents = this.aliveAgents.filter(({ agentId }) => aliveAgentIdsThisTurn.has(agentId));
     }
 
     public playTurn() {
         this.currentGameTurn++;
 
-        // Reevaluate the game strategy on each turn
+        // On réévalue les rôles à CHAQUE tour (pas seulement au changement de
+        // stratégie) car le nombre d'agents vivants change au fil des combats,
+        // et donc l'équilibre attaque/contrôle-territoire doit suivre.
         const strategy = this.selectStrategy();
-        if (strategy !== this.currentStrategy) {
-            this.currentStrategy = strategy;
-            // Assign agent behaviors
-            this.assignBehaviorsForStrategy(strategy);
-        }
+        this.currentStrategy = strategy;
+        this.assignBehaviorsForStrategy(strategy);
 
-        // Let each ally decide what to do according to their internal behavior policy state
         this.aliveAllies.forEach((ally) => {
             ally.decideActions({
-                // Pass game data
                 allies: this.aliveAllies,
                 enemies: this.aliveEnemies,
                 gameMap: this.gameMap,
@@ -210,34 +309,17 @@ class Game {
     }
 }
 
-class TurnContext {
-    private aliveAgents: Agent[] = [];
-
-    private upsertAgent(agentProps: AgentProps): void {
-        const existingAgent = this.aliveAgents.find(
-            (agent) => agent.agentId === agentProps.agentId
-        );
-
-        // Update state of existing agent
-        if (existingAgent) return existingAgent.update(agentProps);
-
-        // Create agent instance
-        const newAgent = new Agent(agentProps);
-        this.aliveAgents.push(newAgent);
-    }
-}
-
 class GameMap {
     constructor() {
         var inputs: string[] = readline().split(' ');
-        this.width = parseInt(inputs[0]); // Width of the game map
-        this.height = parseInt(inputs[1]); // Height of the game map
+        this.width = parseInt(inputs[0]);
+        this.height = parseInt(inputs[1]);
 
         for (let i = 0; i < this.height; i++) {
             var inputs: string[] = readline().split(' ');
             for (let j = 0; j < this.width; j++) {
-                const x: number = parseInt(inputs[3 * j]);// X coordinate, 0 is left edge
-                const y: number = parseInt(inputs[3 * j + 1]);// Y coordinate, 0 is top edge
+                const x: number = parseInt(inputs[3 * j]);
+                const y: number = parseInt(inputs[3 * j + 1]);
                 const tileType: number = parseInt(inputs[3 * j + 2]);
                 this.grid.set(this.getCoordinatesKey({ x, y }), {
                     x, y, tileType
@@ -261,20 +343,20 @@ class GameMap {
         this.getCoordinatesKey(coordinates)
     );
 
-    private getAdjacentTilesOf ({ x, y }: Coordinates): { tile: GameMapGridTile; direction: Direction }[] {
+    private getAdjacentTilesOf({ x, y }: Coordinates): { tile: GameMapGridTile; direction: Direction }[] {
         return [
             { tile: this.getTileAt({ x: x - 1, y })!, direction: Direction.LEFT },
             { tile: this.getTileAt({ x: x + 1, y })!, direction: Direction.RIGHT },
             { tile: this.getTileAt({ x, y: y - 1 })!, direction: Direction.TOP },
             { tile: this.getTileAt({ x, y: y + 1 })!, direction: Direction.BOTTOM },
-        ].filter(({ tile }) => Boolean(tile)); // getTileAt returns undefined when tile is out of bounds
+        ].filter(({ tile }) => Boolean(tile));
     }
 
-    public isSamePosition (posA: Coordinates, posB: Coordinates): boolean {
+    public isSamePosition(posA: Coordinates, posB: Coordinates): boolean {
         return posA.x === posB.x && posA.y === posB.y;
     }
 
-    private getManhattanDistance(a: Coordinates, b: Coordinates): number {
+    public getManhattanDistance(a: Coordinates, b: Coordinates): number {
         return Math.abs(a.x - b.x) + Math.abs(a.y - b.y);
     }
 
@@ -295,12 +377,11 @@ class GameMap {
         origin: Coordinates,
         distance: number
     }): GameMapGridTile[] {
-        return [...this.grid.values()].filter((tile) => 
+        return [...this.grid.values()].filter((tile) =>
             this.getChebyshevDistance(origin, tile) <= distance
         );
     }
 
-    /** Finds the first step on the shortest path from origin to target using a BFS search */
     public findNextStepOnShortestPath({
         origin,
         target,
@@ -375,15 +456,10 @@ class GameMap {
                 agent,
                 distanceFromOrigin: this.getManhattanDistance(agent.coordinates, closerToPosition)
             }))
-            .sort((a, b) => a.distanceFromOrigin - b.distanceFromOrigin) // ASC
+            .sort((a, b) => a.distanceFromOrigin - b.distanceFromOrigin)
             [0].agent;
     }
 
-    /**
-     * Returns positions evenly distributed along the map's vertical axis.
-     * All positions preserve the origin's x coordinate and are spaced from
-     * the top to the bottom edge of the map using a "space-between" distribution.
-     */
     public getVerticalSpreadPositions({
         origin,
         count
@@ -408,7 +484,18 @@ class GameMap {
         );
     }
 
-    public get obstaclesPercentage () {
+    /**
+     * Position "de contrôle de territoire" : sur la ligne verticale médiane
+     * entre le barycentre des alliés et celui des ennemis, clampée pour
+     * rester dans la grille. Tenir cette ligne maximise le nombre de cases
+     * plus proches de nous que de l'adversaire (le vrai critère de score).
+     */
+    public getFrontierX(myAveragePosition: Coordinates, enemyAveragePosition: Coordinates): number {
+        const midX = Math.round((myAveragePosition.x + enemyAveragePosition.x) / 2);
+        return Math.max(0, Math.min(this.width - 1, midX));
+    }
+
+    public get obstaclesPercentage() {
         const tiles = [...this.grid.values()];
         const obstacles = tiles.filter(({ tileType }) => tileType !== TileType.EMPTY);
         return obstacles.length / tiles.length * 100;
@@ -419,20 +506,15 @@ class GameMap {
     // =============================================================================
     private covers: Cover[] = [];
 
-    /** Build a map of all existing covers and the total area they protect from */
     private buildCoverMap() {
-        // Find all obstacles
         const obstacles = [...this.grid.values()].filter((tile) => tile.tileType !== TileType.EMPTY);
 
-        // Calculate protection zone for each cover tile
-        // Duplicate tiles should be kept for further calculation of total protection area
         const coverComponents: Cover[] = [];
 
         obstacles.forEach((obstacleTile) => {
-            // Covers are adjacent to obstacles
             const emptyAdjacents = this.getAdjacentTilesOf(obstacleTile)
                 .filter(({ tile }) => tile.tileType === TileType.EMPTY);
-                
+
             emptyAdjacents.forEach((adjacent) => {
                 coverComponents.push({
                     tile: adjacent.tile,
@@ -448,22 +530,19 @@ class GameMap {
             });
         });
 
-        // Merge cover component duplicates (tiles that gain protection from multiple obstacles)
         const coversMap = coverComponents.reduce<Map<string, Cover>>(
             (covers, cover) => {
                 const coordinatesKey = this.getCoordinatesKey(cover.tile);
                 const duplicate = covers.get(coordinatesKey);
                 const hasDuplicate = Boolean(duplicate);
                 if (!hasDuplicate) {
-                    // Keep cover as is
                     covers.set(coordinatesKey, cover);
                     return covers;
                 }
 
-                // Merge duplicates
                 const mergedDuplicates: Cover = {
-                    tile: cover.tile, // both duplicates logically have the same tile
-                    obstacles: [...duplicate?.obstacles ?? [], ...cover.obstacles] // merge obstacles
+                    tile: cover.tile,
+                    obstacles: [...duplicate?.obstacles ?? [], ...cover.obstacles]
                 }
                 covers.set(coordinatesKey, mergedDuplicates);
                 return covers
@@ -472,6 +551,10 @@ class GameMap {
         );
 
         this.covers = [...coversMap.values()];
+    }
+
+    public isTileCover(position: Coordinates): boolean {
+        return this.covers.some((cover) => this.isSamePosition(cover.tile, position));
     }
 
     public getIdealCoverNearby({
@@ -485,18 +568,14 @@ class GameMap {
         enemies: Agent[];
         maxDistance: number
     }): Coordinates {
-        // Collect all tiles within maxDistance
         const moveCandidates = this.getTilesWithinChebyshevDistance({ origin, distance: maxDistance })
             .filter((moveCandidate) => (
-                // that are not already occupied by an agent
                 !occupiedPositions.some((occupiedPosition) =>
                     this.isSamePosition(moveCandidate, occupiedPosition)
                 )
-                // or by an obstacle
                 && moveCandidate.tileType === TileType.EMPTY
             ));
 
-        // Find nearest move candidate that blocks the most enemies and w/ highest protection lvl
         return moveCandidates
             .map((moveCandidate) => ({
                 moveCandidate,
@@ -509,26 +588,25 @@ class GameMap {
             .sort((a, b) => {
                 // 1st priority: shortest distance
                 const distanceDiff = a.distanceFromOrigin - b.distanceFromOrigin;
-                if (distanceDiff !== 0) return distanceDiff; 
+                if (distanceDiff !== 0) return distanceDiff;
 
-                // Protection type
+                // 2nd priority: highest protection level (FIX: comparait la mauvaise variable avant)
                 const protectionDiff = (b.protectionType ?? TileType.EMPTY) - (a.protectionType ?? TileType.EMPTY);
-                if (protectionDiff !== 0) return protectionDiff; 
+                if (protectionDiff !== 0) return protectionDiff;
 
-                // Blocked enemies count
+                // 3rd priority: blocks the most enemies
                 const blockedDiff = (b.blockedEnemiesCount ?? 0) - (a.blockedEnemiesCount ?? 0);
                 return blockedDiff;
             })
-            [0]?.moveCandidate ?? origin; // If no move candidate found, do not move
+            [0]?.moveCandidate ?? origin;
     }
 
     private getCoverTotalProtectionZone(cover: Cover): ProtectionZone {
         if (cover.obstacles.length === 1) return {
             zone: cover.obstacles[0].protectedAgainst,
             protectionType: cover.obstacles[0].tile.tileType
-        }; // Skip if merging is not needed
+        };
 
-        // Merge protection zone of each obstacle (use Map to avoid duplicates)
         const mergedProtectionZonesMap = cover.obstacles.reduce<Map<string, Coordinates>>(
             (positionsMap, coverObstacle) => {
                 coverObstacle.protectedAgainst.forEach((position) => {
@@ -536,11 +614,10 @@ class GameMap {
                     positionsMap.set(coordinatesKey, position)
                 });
                 return positionsMap;
-            }, 
+            },
             new Map()
         );
 
-        // Use obstacle w/ the highest tileType 
         const protectionType: TileType = cover.obstacles.reduce(
             (highest, obstacle) => Math.max(highest, obstacle.tile.tileType),
             TileType.EMPTY
@@ -548,7 +625,7 @@ class GameMap {
 
         return {
             zone: [...mergedProtectionZonesMap.values()],
-            protectionType 
+            protectionType
         };
     }
 
@@ -559,14 +636,11 @@ class GameMap {
         position: Coordinates;
         enemies: Agent[];
     }) {
-        // Check if the selected position is a cover
         const cover = this.covers.find((cover) => this.isSamePosition(cover.tile, position));
-        if (!cover) return 0; // if not, the selected position does not offer any protection
+        if (!cover) return 0;
 
-        // Check the total protection zone 
         const protectionZone = this.getCoverTotalProtectionZone(cover);
 
-        // Check how many enemies are within the zone
         return {
             blockedEnemiesCount: protectionZone.zone.reduce<number>(
                 (count, position) => {
@@ -586,8 +660,7 @@ class GameMap {
         obstaclePosition: Coordinates;
         coverAt: Direction;
     }): GameMapGridTile[] {
-        // Get all tiles beyond obstacle
-        const tilesBeyondObstacle = (() => 
+        const tilesBeyondObstacle = (() =>
             [...this.grid.values()].filter((tile) => {
                 switch (coverAt) {
                     case Direction.TOP:
@@ -602,14 +675,12 @@ class GameMap {
             })
         )();
 
-        // Get all tiles within 1 tile of chebyshev distance
         const obstacleNeighbors = this.getTilesWithinChebyshevDistance({
             origin: obstaclePosition,
             distance: 1
         });
 
-        // Substracts obstacle neighbors from protection zone
-        return tilesBeyondObstacle.filter((tileBeyondObstacle) => 
+        return tilesBeyondObstacle.filter((tileBeyondObstacle) =>
             !obstacleNeighbors.some((obstacleNeighbor) => this.isSamePosition(tileBeyondObstacle, obstacleNeighbor))
         );
     }
@@ -622,20 +693,18 @@ class GameMap {
         shooterTarget: Agent;
     }): TileType {
         const targetCover = this.covers.find((cover) => this.isSamePosition(cover.tile, shooterTarget.coordinates));
-        if (!targetCover) return TileType.EMPTY; // Target does not have cover
+        if (!targetCover) return TileType.EMPTY;
 
-        // Check whether shooter is within its target's protection zone
         const targetProtectionZone = this.getCoverTotalProtectionZone(targetCover);
         return targetProtectionZone.zone.some((tile) => this.isSamePosition(shooter.coordinates, tile))
             ? targetProtectionZone.protectionType
-            : TileType.EMPTY // Shooter is outside protecion zone
+            : TileType.EMPTY
     }
 
     // =============================================================================
     // SHOOTING
     // =============================================================================
-    /** N.B.: the enemy can still hunker down, which seems to be unpredictable */
-    private estimateEffectiveShotDamage ({
+    public estimateEffectiveShotDamage({
         shooter,
         shooterTarget
     }: {
@@ -651,7 +720,7 @@ class GameMap {
 
         const targetCover = this.calculateProtectionTypeAgainstShooter({ shooter, shooterTarget });
         switch (targetCover) {
-            case TileType.HIGH_COVER: return baseDamage * 3/4;
+            case TileType.HIGH_COVER: return baseDamage * 3 / 4;
             case TileType.LOW_COVER: return baseDamage / 2;
             default: return baseDamage;
         }
@@ -661,15 +730,23 @@ class GameMap {
         return params.wetness + params.effectiveDamage >= 100;
     }
 
-    /** Find closest enemy whose protection zone does not contain shooter */
+    /**
+     * Choix de cible amélioré :
+     * - priorité aux kills (et parmi les kills, celui qui porte le plus de bombes)
+     * - sinon, on privilégie le ratio dégâts/cooldown (efficacité du tir)
+     * - on évite le sur-kill : si un allié peut déjà tuer la cible, on ne
+     *   "gaspille" pas un second agent dessus s'il existe une autre cible utile
+     */
     public getIdealShootTarget({
         enemies,
         shooter,
+        alreadyLethalTargets = new Set<number>()
     }: {
         enemies: Agent[];
         shooter: Agent;
+        alreadyLethalTargets?: Set<number>;
     }): Agent {
-        return enemies
+        const candidates = enemies
             .filter((enemy) => {
                 const maxRange = shooter.metaData.optimalRange * 2;
                 return this.getManhattanDistance(shooter.coordinates, enemy.coordinates) <= maxRange;
@@ -677,32 +754,35 @@ class GameMap {
             .map((enemy) => {
                 const effectiveDamage = this.estimateEffectiveShotDamage({ shooter, shooterTarget: enemy });
                 const canKill = this.canTargetBeKilledNow({ effectiveDamage, wetness: enemy.wetness });
-                return { enemy, effectiveDamage, canKill };
-            })
-            .sort((a, b) => {
-                // 1. Kill priority
-                const killDiff = Number(b.canKill) - Number(a.canKill);
-                if (killDiff !== 0)
-                    return killDiff;
+                const alreadyDoomed = alreadyLethalTargets.has(enemy.agentId);
+                return { enemy, effectiveDamage, canKill, alreadyDoomed };
+            });
 
-                // 2. Among killable targets, remove the biggest bomb threat first
-                if (a.canKill && b.canKill) {
-                    const bombDiff = b.enemy.splashBombs - a.enemy.splashBombs;
-                    if (bombDiff !== 0)
-                        return bombDiff;
-                }
+        const sorted = candidates.sort((a, b) => {
+            // 1. Ne pas gaspiller un tir sur une cible déjà condamnée par un allié,
+            //    sauf s'il n'y a rien de mieux à faire
+            const wasteDiff = Number(a.alreadyDoomed) - Number(b.alreadyDoomed);
+            if (wasteDiff !== 0) return wasteDiff;
 
-                // 3. Highest damage output
-                const damageOutputDiff =
-                    (b.enemy.wetness + b.effectiveDamage) -
-                    (a.enemy.wetness + a.effectiveDamage);
-                if (damageOutputDiff !== 0)
-                    return damageOutputDiff;
+            // 2. Priorité aux kills
+            const killDiff = Number(b.canKill) - Number(a.canKill);
+            if (killDiff !== 0) return killDiff;
 
-                // 4. Remaining tie-breaker: bomb carriers
-                return b.enemy.splashBombs - a.enemy.splashBombs;
-            })
-            [0]?.enemy;
+            // 3. Parmi les kills, celui qui porte le plus de bombes
+            if (a.canKill && b.canKill) {
+                const bombDiff = b.enemy.splashBombs - a.enemy.splashBombs;
+                if (bombDiff !== 0) return bombDiff;
+            }
+
+            // 4. Dégâts effectifs les plus élevés (rapproche le plus une cible de la mort)
+            const damageDiff = b.effectiveDamage - a.effectiveDamage;
+            if (damageDiff !== 0) return damageDiff;
+
+            // 5. Tie-breaker : porteurs de bombes
+            return b.enemy.splashBombs - a.enemy.splashBombs;
+        });
+
+        return sorted[0]?.enemy;
     }
 
     // =============================================================================
@@ -712,7 +792,7 @@ class GameMap {
         return this.getTilesWithinChebyshevDistance({ origin, distance: 1 });
     }
 
-    private isBombTargetInReach ({
+    private isBombTargetInReach({
         throwerPosition,
         targetPosition
     }: {
@@ -744,7 +824,6 @@ class GameMap {
             .map((target) => {
                 const splashZone = this.getSplashZone(target);
 
-                // Count allies and enemies in splash zone
                 let touchedAllies: Agent[] = [];
                 let touchedEnemies: Agent[] = [];
                 let touchedEnemyBombs = 0;
@@ -759,10 +838,9 @@ class GameMap {
                 });
 
                 const willWasteBomb = (
-                    // Do not throw bomb if there's only 1 enemy and they can be killed by shot
-                    touchedEnemies.length === 1 && 
+                    touchedEnemies.length === 1 &&
                     this.canTargetBeKilledNow({
-                        effectiveDamage: this.estimateEffectiveShotDamage({ shooter: thrower, shooterTarget: touchedEnemies[0]}),
+                        effectiveDamage: this.estimateEffectiveShotDamage({ shooter: thrower, shooterTarget: touchedEnemies[0] }),
                         wetness: touchedEnemies[0].wetness
                     })
                 );
@@ -771,7 +849,6 @@ class GameMap {
                     target,
                     touchedAllies,
                     touchedAlliesCount: touchedAllies.length,
-                    touchedEnemies: touchedEnemies.map((enemy) => `#${enemy.agentId}; ${enemy.coordinates.x}, ${enemy.coordinates.y}`),
                     touchedEnemiesCount: touchedEnemies.length,
                     touchedEnemyBombs,
                     killableEnemiesCount: touchedEnemies.filter((enemy) => enemy.wetness >= 70).length,
@@ -779,30 +856,20 @@ class GameMap {
                 };
             })
             .filter(({ touchedAlliesCount, touchedEnemiesCount, willWasteBomb }) =>
-                // Skip bomb targets that would affect more than 1 ally
                 touchedAlliesCount <= maxTouchedAllies &&
-                // 'Touch 1 or more enemies' requirement
                 touchedEnemiesCount >= minTouchedEnemies &&
-                // Avoid wasting bombs
                 !willWasteBomb
             )
             .sort((a, b) => {
-                // Priority 1: hit the most enemies
                 const touchedDiff = b.touchedEnemiesCount - a.touchedEnemiesCount;
-                if (touchedDiff !== 0)
-                    return touchedDiff;
+                if (touchedDiff !== 0) return touchedDiff;
 
-                // Priority 2: kill enemies
                 const killDiff = b.killableEnemiesCount - a.killableEnemiesCount;
-                if (killDiff !== 0)
-                    return killDiff; 
-                
-                // Priority 3: remove the highest bomb threat
-                const bombDiff = b.touchedEnemyBombs - a.touchedEnemyBombs;
-                if (bombDiff !== 0)
-                    return bombDiff;
+                if (killDiff !== 0) return killDiff;
 
-                // Minimize number of touched allies
+                const bombDiff = b.touchedEnemyBombs - a.touchedEnemyBombs;
+                if (bombDiff !== 0) return bombDiff;
+
                 return a.touchedAlliesCount - b.touchedAlliesCount;
             })
             [0]?.target;
@@ -837,17 +904,26 @@ class Agent {
         gameMap: GameMap;
         alliesCount: number;
     }): Coordinates {
-        // Make n vertical groups
         const verticalSpreadPositions = gameMap.getVerticalSpreadPositions({ origin, count: alliesCount });
 
-        // Distribute the allies in the groups by vertical proximity
         return verticalSpreadPositions.sort((a, b) =>
             Math.abs(this.coordinates.y - a.y) -
             Math.abs(this.coordinates.y - b.y)
         )[0];
     }
 
-    /** Get the next move coordinates */
+    /**
+     * Cherche l'ennemi le plus proche (menace la plus immédiate / cible la
+     * plus facile à engager) pour éviter de foncer vers un barycentre qui
+     * peut être un point vide entre deux ennemis éloignés.
+     */
+    private getClosestEnemy(enemies: Agent[], gameMap: GameMap): Agent {
+        return [...enemies].sort(
+            (a, b) => gameMap.getManhattanDistance(this.coordinates, a.coordinates)
+                - gameMap.getManhattanDistance(this.coordinates, b.coordinates)
+        )[0];
+    }
+
     private getAgentNextMove({
         formationRole,
         gameMap,
@@ -862,42 +938,60 @@ class Agent {
         gameStrategy: GameStrategy
     }): Coordinates {
         let nextMove: Coordinates;
-        
+
         const averageEnemiesPosition = gameMap.getAveragePosition(
             enemies.map((enemy) => enemy.coordinates)
+        );
+        const averageAlliesPosition = gameMap.getAveragePosition(
+            allies.map((ally) => ally.coordinates)
         );
         const occupiedPositions = [...allies, ...enemies].map((agent) => agent.coordinates);
 
         switch (formationRole) {
             case 'frontline': {
-                // === FRONTLINERS MOVE FRONTALLY TOWARDS ENEMIES CENTER ===
-                this.actionService.message(`${gameStrategy} - Pressing forward`);
+                // === On avance vers l'ennemi le plus proche, mais on s'arrête
+                //     dès qu'on est à portée optimale au lieu de foncer dessus ===
+                this.actionService.message(`${gameStrategy} - Engaging`);
 
-                nextMove = averageEnemiesPosition;
+                const target = this.getClosestEnemy(enemies, gameMap) ?? { coordinates: averageEnemiesPosition };
+                const distanceToTarget = gameMap.getManhattanDistance(this.coordinates, target.coordinates);
+
+                if (distanceToTarget <= this.metaData.optimalRange) {
+                    // Déjà à portée idéale : pas besoin d'avancer plus, on va
+                    // simplement chercher la meilleure couverture sur place.
+                    nextMove = this.coordinates;
+                } else {
+                    nextMove = target.coordinates;
+                }
                 break;
             } case 'harass-bomb-owners':
-                // === GO TO ENEMY WHO OWNS THE MOST BOMBS ===
-                 this.actionService.message(`${gameStrategy} - Give me your bombs`);
+                this.actionService.message(`${gameStrategy} - Give me your bombs`);
                 return enemies.reduce((max, enemy) => enemy.splashBombs > max.splashBombs ? enemy : max, enemies[0])?.coordinates;
+            case 'controller': {
+                // === Tient la ligne médiane pour maximiser le contrôle de
+                //     territoire, indépendamment de l'engagement direct ===
+                this.actionService.message(`${gameStrategy} - Holding the line`);
+
+                const frontierX = gameMap.getFrontierX(averageAlliesPosition, averageEnemiesPosition);
+                nextMove = { x: frontierX, y: this.coordinates.y };
+                break;
+            }
             case 'follower': {
-                // === FOLLOWERS STAY BEHIND ===
                 this.actionService.message(`${gameStrategy} - Watching your back`);
 
-                // Find next move
-                // Add distance behind attackers
                 const MIN_DISTANCE_FROM_ATTACKERS = 2;
-                const nonFollowers = allies.filter((ally) => ally.behaviorPolicy.formationRole !== 'follower');
+                const frontliners = allies.filter((ally) => ally.behaviorPolicy.formationRole === 'frontline');
                 const averageFrontlinePosition = (() => {
-                    if (nonFollowers.length === 0) return this.coordinates; // N.B.: should not happen, there should never be followers only
-                    if (nonFollowers.length === 1) return nonFollowers[0].coordinates;
-                    return gameMap.getAveragePosition(nonFollowers.map((attacker) => attacker.coordinates));
+                    if (frontliners.length === 0) return this.coordinates;
+                    if (frontliners.length === 1) return frontliners[0].coordinates;
+                    return gameMap.getAveragePosition(frontliners.map((attacker) => attacker.coordinates));
                 })();
                 const areEnemiesGroupAtRightOfAllies = averageFrontlinePosition.x < averageEnemiesPosition.x;
                 const behindAttackers = {
                     x: areEnemiesGroupAtRightOfAllies ?
-                        // Add distance while keeping value in bounds
                         Math.max(0, averageFrontlinePosition.x - MIN_DISTANCE_FROM_ATTACKERS) :
-                        Math.min(gameMap.width, averageFrontlinePosition.x + MIN_DISTANCE_FROM_ATTACKERS),
+                        // FIX: off-by-one, la coordonnée max valide est width - 1
+                        Math.min(gameMap.width - 1, averageFrontlinePosition.x + MIN_DISTANCE_FROM_ATTACKERS),
                     y: averageEnemiesPosition.y
                 };
 
@@ -906,14 +1000,12 @@ class Agent {
             }
         }
 
-        // Create vertical ally groups to minimize splash damage impact
         const verticalSpread = this.getAgentVerticalSpreadPosition({
             origin: nextMove,
             alliesCount: allies.length,
             gameMap
         });
 
-        // Look for closest cover around target position
         const MAX_COVER_DISTANCE_FROM_TARGET_POSITION = 3;
         const closestCoverAroundTargetPosition = gameMap.getIdealCoverNearby({
             maxDistance: MAX_COVER_DISTANCE_FROM_TARGET_POSITION,
@@ -929,10 +1021,6 @@ class Agent {
         });
     }
 
-    /**
-     * Choose what to do depending on the current agent behavior state
-     * and execute actions
-     */
     public decideActions({
         gameMap,
         allies,
@@ -958,13 +1046,8 @@ class Agent {
         });
 
         // === BATTLE ACTION ===
-        // Register battle actions from lowest to highest priority.
-        // ActionService keeps only the last registered battle action.
-
-        // 3rd priority: hunker down by default (potentially overridden by further action via actionService)
         this.actionService.hunkerDown();
 
-        // 2nd priority: try to shoot
         const canShoot = this.cooldown === 0;
         if (canShoot) {
             const idealShootTarget = gameMap.getIdealShootTarget({
@@ -974,7 +1057,6 @@ class Agent {
             if (idealShootTarget) this.actionService.shoot(idealShootTarget.agentId);
         }
 
-        // 1st priority: try to throw a bomb
         const hasBombs = this.splashBombs > 0;
         if (hasBombs) {
             const idealBombTarget = gameMap.getIdealBombTarget({
@@ -987,7 +1069,6 @@ class Agent {
             if (idealBombTarget) this.actionService.throw(idealBombTarget);
         }
 
-        // Execute actions
         this.actionService.executeActions();
     }
 };
@@ -1002,10 +1083,10 @@ class AgentActionService {
     };
     private readonly actions: AgentAction[] = [];
 
-    constructor(private agentId: number) {}
+    constructor(private agentId: number) { }
 
     public move = ({ currentPosition, targetPosition }: { currentPosition: Coordinates; targetPosition: Coordinates; }) => {
-        if (targetPosition.x === currentPosition.x && targetPosition.y === currentPosition.y) return this; // do not register any action if destination equals origin
+        if (targetPosition.x === currentPosition.x && targetPosition.y === currentPosition.y) return this;
 
         this.actions.push({
             type: this.ACTION_TYPES.MOVE,
@@ -1040,17 +1121,11 @@ class AgentActionService {
         return this;
     }
 
-    /**
-     * Battle actions are priority-ordered by registration.
-     * The last registered battle action wins.
-     */
     public executeActions = () => {
-        // If multiple move actions have been registered, only use the latest one
         const moveAction = [...this.actions]
             .reverse()
             .find(action => action.type.name === AgentActionName.MOVE);
 
-        // If multiple battle actions have been registered, only use the latest one
         const battleAction = [...this.actions]
             .reverse()
             .find(action => action.type.isBattleAction);
@@ -1066,12 +1141,9 @@ class AgentActionService {
         ].filter(Boolean);
 
         if (!filteredActions.length) {
-            // Always output a command to avoid forfeiting the turn
             console.log(`${this.agentId}; HUNKER_DOWN`);
             return;
         }
-
-        // Execute registered actions then flush
 
         console.log(
             [
@@ -1087,6 +1159,8 @@ class AgentActionService {
         this.actions.length = 0;
     }
 }
+
+declare function readline(): string;
 
 const game = new Game();
 
