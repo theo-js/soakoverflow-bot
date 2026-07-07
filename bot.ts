@@ -64,12 +64,16 @@ type TargetDamageCasualty = {
     ceiledResultingWetness: number;
     overkillWetness: number;
 };
-type TurnCandidate = {
-    actionType: AgentActionName;
+type TurnCandidateBase = {
     move: Coordinates;
     threatsEvaluation: ThreatEvaluation[];
-    targetDamageEvaluation: TargetDamageEvaluation | undefined;
 };
+type TurnCandidateHunkerDown = TurnCandidateBase & { actionType: AgentActionName.HUNKER_DOWN };
+type TurnCandidateAttack = TurnCandidateBase & {
+    actionType: AgentActionName.SHOOT | AgentActionName.THROW;
+    targetDamageEvaluation: TargetDamageEvaluation;
+};
+type TurnCandidate = TurnCandidateHunkerDown | TurnCandidateAttack;
 
 enum TileType {
     EMPTY = 0,
@@ -813,7 +817,7 @@ class Agent {
         const turnCandidates: TurnCandidate[] = moveCandidates.flatMap((move) => {
             const movedAgent = { ...this, coordinates: move };
             const threatsEvaluation = this.evaluateThreats({ ally: movedAgent, enemies, gameMap })
-            const turnCandidateBase = { move, threatsEvaluation };
+            const turnCandidateBase: TurnCandidateBase = { move, threatsEvaluation };
 
             const turnCandidatesForThisMove: TurnCandidate[] = [
                 // Simulate throw actions
@@ -826,7 +830,7 @@ class Agent {
                         minTouchedEnemies: 1, // TODO: use dynamic parameters ?
                         maxTouchedAllies: 0
                     })
-                        .map((targetDamageEvaluation): TurnCandidate => ({
+                        .map((targetDamageEvaluation): TurnCandidateAttack => ({
                             ...turnCandidateBase,
                             actionType: AgentActionName.THROW,
                             targetDamageEvaluation,
@@ -839,7 +843,7 @@ class Agent {
                         shooter: movedAgent,
                         enemies, gameMap
                     })
-                        .map((targetDamageEvaluation): TurnCandidate => ({
+                        .map((targetDamageEvaluation): TurnCandidateAttack => ({
                             ...turnCandidateBase,
                             actionType: AgentActionName.SHOOT,
                             targetDamageEvaluation
@@ -847,7 +851,7 @@ class Agent {
                 ),
 
                 // Hunker down
-                { ...turnCandidateBase, actionType: AgentActionName.HUNKER_DOWN, targetDamageEvaluation: undefined }
+                { ...turnCandidateBase, actionType: AgentActionName.HUNKER_DOWN }
             ];
             return turnCandidatesForThisMove;
         });
@@ -865,49 +869,17 @@ class Agent {
         
         // No immediate opportunity found => search for an ideal destination
 
-
-        // === MOVE ACTION ===
-        // const nextMove = this.getAgentNextMove({
-        //     gameMap,
-        //     allies,
-        //     enemies,
-        // });
-        // this.actionService.move({
-        //     currentPosition: this.coordinates,
-        //     targetPosition: nextMove
-        // });
-
-        // // === BATTLE ACTION ===
-        // // Register battle actions from lowest to highest priority.
-        // // ActionService keeps only the last registered battle action.
-
-        // // 3rd priority: hunker down by default (potentially overridden by further action via actionService)
-        // this.actionService.hunkerDown();
-
-        // // 2nd priority: try to shoot
-        // const canShoot = this.cooldown === 0;
-        // if (canShoot) {
-        //     const idealShootTarget = gameMap.getIdealShootTarget({
-        //         shooter: this,
-        //         enemies: enemies,
-        //     });
-        //     if (idealShootTarget) this.actionService.shoot(idealShootTarget.agentId);
-        // }
-
-        // // 1st priority: try to throw a bomb
-        // const hasBombs = this.splashBombs > 0;
-        // if (hasBombs) {
-        //     const idealBombTarget = gameMap.getIdealBombTarget({
-        //         thrower: this,
-        //         allies: allies,
-        //         enemies: enemies,
-        //         maxTouchedAllies: this.behaviorPolicy.bombPolicy.allowFriendlyFire ? 1 : 0,
-        //         minTouchedEnemies: this.behaviorPolicy.bombPolicy.requireEnemyCluster ? 2 : 1
-        //     });
-        //     if (idealBombTarget) this.actionService.throw(idealBombTarget);
-        // }
-
         // Execute actions
+        this.actionService.move({ currentPosition: this.coordinates, targetPosition: bestImmediateOpportunity.move });
+        switch(bestImmediateOpportunity.actionType) {
+            case AgentActionName.SHOOT:
+                this.actionService.shoot(bestImmediateOpportunity.targetDamageEvaluation.casualties[0]!.agent.agentId);
+            case AgentActionName.THROW:
+                this.actionService.throw(bestImmediateOpportunity.targetDamageEvaluation.targetPosition);
+            case AgentActionName.HUNKER_DOWN:
+                this.actionService.hunkerDown();
+        }
+
         this.actionService.executeActions();
     }
 
