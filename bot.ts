@@ -671,7 +671,7 @@ class Agent {
     > = {
         kill: (a, b) => {
             // 1. Number of kills
-            const getKills = (tc: TurnCandidate) => tc.targetDamageEvaluation?.casualties?.filter((c) => c.isKill)?.length ?? 0;
+            const getKills = (tc: TurnCandidate) => tc.targetDamageEvaluation?.casualties.filter((c) => c.isKill)?.length ?? 0;
             const aKills = getKills(a);
             const bKills = getKills(b);
             const killDiff = bKills - aKills;
@@ -697,20 +697,20 @@ class Agent {
         },
         'max-damage': (a, b) => {
             // 1. Highest damage output
-            const getTotalDamageOutput = (tc: TurnCandidate) => tc.targetDamageEvaluation?.casualties?.reduce((damage, c) => damage + c.effectiveDamage, 0) ?? 0;
+            const getTotalDamageOutput = (tc: TurnCandidate) => tc.targetDamageEvaluation?.casualties.reduce((damage, c) => damage + c.effectiveDamage, 0) ?? 0;
             const damageOutputDiff = getTotalDamageOutput(b) - getTotalDamageOutput(a)
             if (damageOutputDiff !== 0)
                 return damageOutputDiff;
 
             // 2. Reduce overkill
-            const getTotalOverkillOutput = (tc: TurnCandidate) => tc.targetDamageEvaluation?.casualties?.reduce((damage, c) => damage + c.overkillWetness, 0) ?? 0;
+            const getTotalOverkillOutput = (tc: TurnCandidate) => tc.targetDamageEvaluation?.casualties.reduce((damage, c) => damage + c.overkillWetness, 0) ?? 0;
             const overkillOutputDiff = getTotalOverkillOutput(a) - getTotalOverkillOutput(b)
             if (overkillOutputDiff !== 0)
                 return overkillOutputDiff;
 
 
             // 3. Bomb carriers
-            const countSplashBombs = (tc: TurnCandidate) => tc.targetDamageEvaluation!.casualties.reduce((bombs, c) => c.agent.splashBombs, 0);
+            const countSplashBombs = (tc: TurnCandidate) => tc.targetDamageEvaluation?.casualties.reduce((bombs, c) => c.agent.splashBombs, 0) ?? 0;
                 const bombDiff = countSplashBombs(b) - countSplashBombs(a);
                 if (bombDiff !== 0)
                     return bombDiff;
