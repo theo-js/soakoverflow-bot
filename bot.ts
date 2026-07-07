@@ -68,7 +68,10 @@ type TurnCandidateBase = {
     move: Coordinates;
     threatsEvaluation: ThreatEvaluation[];
 };
-type TurnCandidateHunkerDown = TurnCandidateBase & { actionType: AgentActionName.HUNKER_DOWN };
+type TurnCandidateHunkerDown = TurnCandidateBase & {
+    actionType: AgentActionName.HUNKER_DOWN;
+    targetDamageEvaluation: undefined;
+};
 type TurnCandidateAttack = TurnCandidateBase & {
     actionType: AgentActionName.SHOOT | AgentActionName.THROW;
     targetDamageEvaluation: TargetDamageEvaluation;
@@ -851,7 +854,7 @@ class Agent {
                 ),
 
                 // Hunker down
-                { ...turnCandidateBase, actionType: AgentActionName.HUNKER_DOWN }
+                { ...turnCandidateBase, actionType: AgentActionName.HUNKER_DOWN, targetDamageEvaluation: undefined }
             ];
             return turnCandidatesForThisMove;
         });
