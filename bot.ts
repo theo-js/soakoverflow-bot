@@ -3,6 +3,8 @@
  **/
 
 
+declare function readline(): string;
+
 type Coordinates = { x: number; y: number; };
 
 type AgentIdentity = {
@@ -43,6 +45,32 @@ type AgentAction = {
     payload?: string;
 };
 
+type AgentIntent = 'kill' | 'max-damage' | 'survive' | 'min-injuries' | 'territory';
+
+type ThreatEvaluation = {
+    agent: Agent;
+    biggestPotentialDamage: number;
+    canKill: boolean;
+}0
+type TargetDamageEvaluation = {
+    targetPosition: Coordinates;
+    casualties: TargetDamageCasualty[];
+};
+type TargetDamageCasualty = {
+    agent: Agent;
+    isEnemy: boolean;
+    isKill: boolean;
+    effectiveDamage: number;
+    ceiledResultingWetness: number;
+    overkillWetness: number;
+};
+type TurnCandidate = {
+    actionType: AgentActionName;
+    move: Coordinates;
+    threatsEvaluation: ThreatEvaluation[];
+    targetDamageEvaluation: TargetDamageEvaluation | undefined;
+};
+
 enum TileType {
     EMPTY = 0,
     LOW_COVER = 1,
@@ -78,11 +106,10 @@ enum Direction {
 
 class Game {
     private readonly myId: number;
-    private currentGameTurn = 0;
-    private turnContext: T
-    private readonly gameMap: GameMap;
     private readonly allAgentsData = new Map<number, AgentMetaData>;
-
+    private turnContext: TurnContext;
+    private readonly gameMap: GameMap;
+    
     /** Read input and initialize game data */
     constructor() {
         this.myId = parseInt(readline()); // Your player id (0 or 1)
@@ -112,13 +139,90 @@ class Game {
 
         // Read game map data
         this.gameMap = new GameMap();
+
+        // Instanciate turn context
+        this.turnContext = new TurnContext({
+            myId: this.myId,
+            allAgentsData: this.allAgentsData
+        });
     }
 
-    private get aliveAllies() {
+    public readTurn() {
+        const aliveAgentsCount: number = parseInt(readline()); // Total number of agents still in the game
+        const aliveAgentPropsThisTurn: AgentProps[] = []; 
+    
+        for (let i = 0; i < aliveAgentsCount; i++) {
+            var inputs: string[] = readline().split(' ');
+            const agentId: number = parseInt(inputs[0]);
+            const x: number = parseInt(inputs[1]);
+            const y: number = parseInt(inputs[2]);
+            const cooldown: number = parseInt(inputs[3]); // Number of turns before this agent can shoot
+            const splashBombs: number = parseInt(inputs[4]);
+            const wetness: number = parseInt(inputs[5]); // Damage (0-100) this agent has taken
+
+            const metaData = this.allAgentsData.get(agentId); // Bind agent metadata
+            if (!metaData) throw new Error(`Unknown agent ${agentId}`);
+
+            aliveAgentPropsThisTurn.push({
+                agentId,
+                coordinates: { x, y },
+                cooldown,
+                splashBombs,
+                wetness,
+                metaData,
+            });
+        }
+        const _myAgentCount: number = parseInt(readline()); // Number of alive agents controlled by you
+
+        // Initialize this turn's context w/ input data
+        this.turnContext.initTurn({ aliveAgentPropsThisTurn });
+    }
+
+    public playTurn() {
+        // Let each ally decide what to do according to their internal behavior policy state
+        this.turnContext.aliveAllies.forEach((ally) => {
+            ally.decideActions({
+                // Pass game data
+                allies: this.turnContext.aliveAllies,
+                enemies: this.turnContext.aliveEnemies,
+                gameMap: this.gameMap,
+            });
+        });
+    }
+}
+
+class TurnContext {
+    private readonly myId: number;
+    private readonly allAgentsData: Map<number, AgentMetaData>;
+    
+    private currentGameTurn = 0;
+    private aliveAgents: Agent[] = [];
+
+    constructor(turnContextProps: {
+        myId: number;
+        allAgentsData: Map<number, AgentMetaData>;
+    }) {
+        Object.assign(this, turnContextProps);
+    }
+
+    private upsertAgent(agentProps: AgentProps): void {
+        const existingAgent = this.aliveAgents.find(
+            (agent) => agent.agentId === agentProps.agentId
+        );
+
+        // Update state of existing agent
+        if (existingAgent) return existingAgent.update(agentProps);
+
+        // Create agent instance
+        const newAgent = new Agent(agentProps);
+        this.aliveAgents.push(newAgent);
+    }
+
+    public get aliveAllies() {
         return this.aliveAgents.filter((agent) => agent.metaData?.playerId === this.myId);
     }
 
-    private get aliveEnemies() {
+    public get aliveEnemies() {
         return this.aliveAgents.filter((agent) => agent.metaData?.playerId !== this.myId);
     }
 
@@ -151,80 +255,25 @@ class Game {
         return this.aliveEnemies.reduce((count, { splashBombs }) => count + splashBombs, 0);
     }
 
-    public readTurn() {
-        const aliveAgentsCount: number = parseInt(readline()); // Total number of agents still in the game
-        const aliveAgentIdsThisTurn = new Set<number>();
-    
-        for (let i = 0; i < aliveAgentsCount; i++) {
-            var inputs: string[] = readline().split(' ');
-            const agentId: number = parseInt(inputs[0]);
-            aliveAgentIdsThisTurn.add(agentId);
-            const x: number = parseInt(inputs[1]);
-            const y: number = parseInt(inputs[2]);
-            const cooldown: number = parseInt(inputs[3]); // Number of turns before this agent can shoot
-            const splashBombs: number = parseInt(inputs[4]);
-            const wetness: number = parseInt(inputs[5]); // Damage (0-100) this agent has taken
+    public initTurn({
+        aliveAgentPropsThisTurn
+    }: {
+        aliveAgentPropsThisTurn: AgentProps[];
 
-            const metaData = this.allAgentsData.get(agentId); // Bind agent metadata
-            if (!metaData) throw new Error(`Unknown agent ${agentId}`);
-
-            const agentProps: Omit<AgentProps, 'behavior'> = {
-                agentId,
-                coordinates: { x, y },
-                cooldown,
-                splashBombs,
-                wetness,
-                metaData,
-            };
-            
-            // Use singleton agents
-            this.upsertAgent(agentProps);
-        }
-        const _myAgentCount: number = parseInt(readline()); // Number of alive agents controlled by you
-
-        // Remove eliminated agents
-        this.aliveAgents = this.aliveAgents.filter(({ agentId }) => aliveAgentIdsThisTurn.has(agentId));
-    }
-
-    public playTurn() {
+    }): void {
         this.currentGameTurn++;
 
-        // Reevaluate the game strategy on each turn
-        const strategy = this.selectStrategy();
-        if (strategy !== this.currentStrategy) {
-            this.currentStrategy = strategy;
-            // Assign agent behaviors
-            this.assignBehaviorsForStrategy(strategy);
-        }
+        // Upsert each agent
+        aliveAgentPropsThisTurn.forEach((agentProps) => this.upsertAgent(agentProps));
 
-        // Let each ally decide what to do according to their internal behavior policy state
-        this.aliveAllies.forEach((ally) => {
-            ally.decideActions({
-                // Pass game data
-                allies: this.aliveAllies,
-                enemies: this.aliveEnemies,
-                gameMap: this.gameMap,
-                gameStrategy: this.currentStrategy!
-            });
-        });
-    }
-}
-
-class TurnContext {
-    private aliveAgents: Agent[] = [];
-
-    private upsertAgent(agentProps: AgentProps): void {
-        const existingAgent = this.aliveAgents.find(
-            (agent) => agent.agentId === agentProps.agentId
+        // Remove eliminated agents
+        this.aliveAgents = this.aliveAgents.filter(
+            (aliveAgent) => 
+                aliveAgentPropsThisTurn.some((agentProps) => agentProps.agentId === aliveAgent.agentId)
         );
-
-        // Update state of existing agent
-        if (existingAgent) return existingAgent.update(agentProps);
-
-        // Create agent instance
-        const newAgent = new Agent(agentProps);
-        this.aliveAgents.push(newAgent);
     }
+
+    public finishTurn():void {}
 }
 
 class GameMap {
@@ -270,11 +319,30 @@ class GameMap {
         ].filter(({ tile }) => Boolean(tile)); // getTileAt returns undefined when tile is out of bounds
     }
 
+    public getMoveCandidates({
+        origin,
+        occupiedPositions
+    }: {
+        origin: Coordinates;
+        occupiedPositions: Coordinates[];
+    }): GameMapGridTile[] {
+        return [
+            // Move candidate must be orthogonally adjacent or same position
+            this.getTileAt(origin)!,
+            ...this.getAdjacentTilesOf(origin).map(({ tile }) => tile)
+        ]
+            .filter((tile) => (
+                // Move candidate must be walkable
+                tile?.tileType === TileType.EMPTY
+                && !occupiedPositions.some((occupiedPosition) => this.isSamePosition(occupiedPosition, tile))
+            ));
+    }
+
     public isSamePosition (posA: Coordinates, posB: Coordinates): boolean {
         return posA.x === posB.x && posA.y === posB.y;
     }
 
-    private getManhattanDistance(a: Coordinates, b: Coordinates): number {
+    public getManhattanDistance(a: Coordinates, b: Coordinates): number {
         return Math.abs(a.x - b.x) + Math.abs(a.y - b.y);
     }
 
@@ -351,33 +419,33 @@ class GameMap {
         return origin;
     }
 
-    public getAveragePosition(positions: Coordinates[]): Coordinates {
-        const sum = positions.reduce<Coordinates>(
-            (sum, position) => ({ x: sum.x + position.x, y: sum.y + position.y }),
-            { x: 0, y: 0 }
-        );
-        return {
-            x: Math.round(sum.x / positions.length),
-            y: Math.round(sum.y / positions.length)
-        };
-    }
+    // public getAveragePosition(positions: Coordinates[]): Coordinates {
+    //     const sum = positions.reduce<Coordinates>(
+    //         (sum, position) => ({ x: sum.x + position.x, y: sum.y + position.y }),
+    //         { x: 0, y: 0 }
+    //     );
+    //     return {
+    //         x: Math.round(sum.x / positions.length),
+    //         y: Math.round(sum.y / positions.length)
+    //     };
+    // }
 
-    public getCloserAgentTo({
-        agents,
-        closerTo
-    }: {
-        agents: Agent[];
-        closerTo: Coordinates[];
-    }): Agent {
-        const closerToPosition = this.getAveragePosition(closerTo);
-        return agents
-            .map((agent) => ({
-                agent,
-                distanceFromOrigin: this.getManhattanDistance(agent.coordinates, closerToPosition)
-            }))
-            .sort((a, b) => a.distanceFromOrigin - b.distanceFromOrigin) // ASC
-            [0].agent;
-    }
+    // public getCloserAgentTo({
+    //     agents,
+    //     closerTo
+    // }: {
+    //     agents: Agent[];
+    //     closerTo: Coordinates[];
+    // }): Agent {
+    //     const closerToPosition = this.getAveragePosition(closerTo);
+    //     return agents
+    //         .map((agent) => ({
+    //             agent,
+    //             distanceFromOrigin: this.getManhattanDistance(agent.coordinates, closerToPosition)
+    //         }))
+    //         .sort((a, b) => a.distanceFromOrigin - b.distanceFromOrigin) // ASC
+    //         [0].agent;
+    // }
 
     /**
      * Returns positions evenly distributed along the map's vertical axis.
@@ -406,12 +474,6 @@ class GameMap {
                 y: Math.round(index * step)
             })
         );
-    }
-
-    public get obstaclesPercentage () {
-        const tiles = [...this.grid.values()];
-        const obstacles = tiles.filter(({ tileType }) => tileType !== TileType.EMPTY);
-        return obstacles.length / tiles.length * 100;
     }
 
     // =============================================================================
@@ -474,54 +536,6 @@ class GameMap {
         this.covers = [...coversMap.values()];
     }
 
-    public getIdealCoverNearby({
-        origin,
-        occupiedPositions,
-        enemies,
-        maxDistance
-    }: {
-        origin: Coordinates;
-        occupiedPositions: Coordinates[];
-        enemies: Agent[];
-        maxDistance: number
-    }): Coordinates {
-        // Collect all tiles within maxDistance
-        const moveCandidates = this.getTilesWithinChebyshevDistance({ origin, distance: maxDistance })
-            .filter((moveCandidate) => (
-                // that are not already occupied by an agent
-                !occupiedPositions.some((occupiedPosition) =>
-                    this.isSamePosition(moveCandidate, occupiedPosition)
-                )
-                // or by an obstacle
-                && moveCandidate.tileType === TileType.EMPTY
-            ));
-
-        // Find nearest move candidate that blocks the most enemies and w/ highest protection lvl
-        return moveCandidates
-            .map((moveCandidate) => ({
-                moveCandidate,
-                distanceFromOrigin: this.getManhattanDistance(origin, moveCandidate),
-                ...this.getBlockedEnemiesCountAt({
-                    position: moveCandidate,
-                    enemies,
-                })
-            }))
-            .sort((a, b) => {
-                // 1st priority: shortest distance
-                const distanceDiff = a.distanceFromOrigin - b.distanceFromOrigin;
-                if (distanceDiff !== 0) return distanceDiff; 
-
-                // Protection type
-                const protectionDiff = (b.protectionType ?? TileType.EMPTY) - (a.protectionType ?? TileType.EMPTY);
-                if (protectionDiff !== 0) return protectionDiff; 
-
-                // Blocked enemies count
-                const blockedDiff = (b.blockedEnemiesCount ?? 0) - (a.blockedEnemiesCount ?? 0);
-                return blockedDiff;
-            })
-            [0]?.moveCandidate ?? origin; // If no move candidate found, do not move
-    }
-
     private getCoverTotalProtectionZone(cover: Cover): ProtectionZone {
         if (cover.obstacles.length === 1) return {
             zone: cover.obstacles[0].protectedAgainst,
@@ -550,33 +564,6 @@ class GameMap {
             zone: [...mergedProtectionZonesMap.values()],
             protectionType 
         };
-    }
-
-    private getBlockedEnemiesCountAt({
-        position,
-        enemies
-    }: {
-        position: Coordinates;
-        enemies: Agent[];
-    }) {
-        // Check if the selected position is a cover
-        const cover = this.covers.find((cover) => this.isSamePosition(cover.tile, position));
-        if (!cover) return 0; // if not, the selected position does not offer any protection
-
-        // Check the total protection zone 
-        const protectionZone = this.getCoverTotalProtectionZone(cover);
-
-        // Check how many enemies are within the zone
-        return {
-            blockedEnemiesCount: protectionZone.zone.reduce<number>(
-                (count, position) => {
-                    if (enemies.some((enemy) => this.isSamePosition(enemy.coordinates, position)))
-                        count++
-                    return count;
-                }, 0
-            ),
-            protectionType: protectionZone.protectionType
-        }
     }
 
     private getProtectedZoneBehindObstacle({
@@ -614,7 +601,7 @@ class GameMap {
         );
     }
 
-    private calculateProtectionTypeAgainstShooter({
+    public calculateProtectionTypeAgainstShooter({
         shooter,
         shooterTarget
     }: {
@@ -631,88 +618,11 @@ class GameMap {
             : TileType.EMPTY // Shooter is outside protecion zone
     }
 
-    // =============================================================================
-    // SHOOTING
-    // =============================================================================
-    /** N.B.: the enemy can still hunker down, which seems to be unpredictable */
-    private estimateEffectiveShotDamage ({
-        shooter,
-        shooterTarget
-    }: {
-        shooter: Agent;
-        shooterTarget: Agent;
-    }): number {
-        const distanceFromShooter = this.getManhattanDistance(shooterTarget.coordinates, shooter.coordinates);
-        const baseDamage = (() => {
-            if (distanceFromShooter <= shooter.metaData.optimalRange) return shooter.metaData.soakingPower;
-            if (distanceFromShooter <= shooter.metaData.optimalRange * 2) return shooter.metaData.soakingPower / 2;
-            return 0;
-        })();
-
-        const targetCover = this.calculateProtectionTypeAgainstShooter({ shooter, shooterTarget });
-        switch (targetCover) {
-            case TileType.HIGH_COVER: return baseDamage * 3/4;
-            case TileType.LOW_COVER: return baseDamage / 2;
-            default: return baseDamage;
-        }
-    }
-
-    private canTargetBeKilledNow(params: { effectiveDamage: number; wetness: number; }): boolean {
-        return params.wetness + params.effectiveDamage >= 100;
-    }
-
-    /** Find closest enemy whose protection zone does not contain shooter */
-    public getIdealShootTarget({
-        enemies,
-        shooter,
-    }: {
-        enemies: Agent[];
-        shooter: Agent;
-    }): Agent {
-        return enemies
-            .filter((enemy) => {
-                const maxRange = shooter.metaData.optimalRange * 2;
-                return this.getManhattanDistance(shooter.coordinates, enemy.coordinates) <= maxRange;
-            })
-            .map((enemy) => {
-                const effectiveDamage = this.estimateEffectiveShotDamage({ shooter, shooterTarget: enemy });
-                const canKill = this.canTargetBeKilledNow({ effectiveDamage, wetness: enemy.wetness });
-                return { enemy, effectiveDamage, canKill };
-            })
-            .sort((a, b) => {
-                // 1. Kill priority
-                const killDiff = Number(b.canKill) - Number(a.canKill);
-                if (killDiff !== 0)
-                    return killDiff;
-
-                // 2. Among killable targets, remove the biggest bomb threat first
-                if (a.canKill && b.canKill) {
-                    const bombDiff = b.enemy.splashBombs - a.enemy.splashBombs;
-                    if (bombDiff !== 0)
-                        return bombDiff;
-                }
-
-                // 3. Highest damage output
-                const damageOutputDiff =
-                    (b.enemy.wetness + b.effectiveDamage) -
-                    (a.enemy.wetness + a.effectiveDamage);
-                if (damageOutputDiff !== 0)
-                    return damageOutputDiff;
-
-                // 4. Remaining tie-breaker: bomb carriers
-                return b.enemy.splashBombs - a.enemy.splashBombs;
-            })
-            [0]?.enemy;
-    }
-
-    // =============================================================================
-    // SPLASH BOMBS
-    // =============================================================================
-    private getSplashZone(origin: Coordinates): Coordinates[] {
+    public getSplashZone(origin: Coordinates): Coordinates[] {
         return this.getTilesWithinChebyshevDistance({ origin, distance: 1 });
     }
 
-    private isBombTargetInReach ({
+    public isBombTargetInReach ({
         throwerPosition,
         targetPosition
     }: {
@@ -724,88 +634,9 @@ class GameMap {
         return distance <= MAX_DISTANCE;
     }
 
-    public getIdealBombTarget({
-        thrower,
-        allies,
-        enemies,
-        maxTouchedAllies,
-        minTouchedEnemies
-    }: {
-        thrower: Agent;
-        allies: Agent[];
-        enemies: Agent[];
-        maxTouchedAllies: number;
-        minTouchedEnemies: number;
-    }): Coordinates | undefined {
-        const targetsInReach = [...this.grid.values()]
-            .filter((targetPosition) => this.isBombTargetInReach({ throwerPosition: thrower.coordinates, targetPosition }));
-
-        return targetsInReach
-            .map((target) => {
-                const splashZone = this.getSplashZone(target);
-
-                // Count allies and enemies in splash zone
-                let touchedAllies: Agent[] = [];
-                let touchedEnemies: Agent[] = [];
-                let touchedEnemyBombs = 0;
-                splashZone.forEach((tile) => {
-                    allies.forEach((ally) => this.isSamePosition(ally.coordinates, tile) && touchedAllies.push(ally));
-                    enemies.forEach((enemy) => {
-                        if (this.isSamePosition(enemy.coordinates, tile)) {
-                            touchedEnemies.push(enemy);
-                            touchedEnemyBombs += enemy.splashBombs;
-                        }
-                    });
-                });
-
-                const willWasteBomb = (
-                    // Do not throw bomb if there's only 1 enemy and they can be killed by shot
-                    touchedEnemies.length === 1 && 
-                    this.canTargetBeKilledNow({
-                        effectiveDamage: this.estimateEffectiveShotDamage({ shooter: thrower, shooterTarget: touchedEnemies[0]}),
-                        wetness: touchedEnemies[0].wetness
-                    })
-                );
-
-                return {
-                    target,
-                    touchedAllies,
-                    touchedAlliesCount: touchedAllies.length,
-                    touchedEnemies: touchedEnemies.map((enemy) => `#${enemy.agentId}; ${enemy.coordinates.x}, ${enemy.coordinates.y}`),
-                    touchedEnemiesCount: touchedEnemies.length,
-                    touchedEnemyBombs,
-                    killableEnemiesCount: touchedEnemies.filter((enemy) => enemy.wetness >= 70).length,
-                    willWasteBomb
-                };
-            })
-            .filter(({ touchedAlliesCount, touchedEnemiesCount, willWasteBomb }) =>
-                // Skip bomb targets that would affect more than 1 ally
-                touchedAlliesCount <= maxTouchedAllies &&
-                // 'Touch 1 or more enemies' requirement
-                touchedEnemiesCount >= minTouchedEnemies &&
-                // Avoid wasting bombs
-                !willWasteBomb
-            )
-            .sort((a, b) => {
-                // Priority 1: hit the most enemies
-                const touchedDiff = b.touchedEnemiesCount - a.touchedEnemiesCount;
-                if (touchedDiff !== 0)
-                    return touchedDiff;
-
-                // Priority 2: kill enemies
-                const killDiff = b.killableEnemiesCount - a.killableEnemiesCount;
-                if (killDiff !== 0)
-                    return killDiff; 
-                
-                // Priority 3: remove the highest bomb threat
-                const bombDiff = b.touchedEnemyBombs - a.touchedEnemyBombs;
-                if (bombDiff !== 0)
-                    return bombDiff;
-
-                // Minimize number of touched allies
-                return a.touchedAlliesCount - b.touchedAlliesCount;
-            })
-            [0]?.target;
+    public getAreaReachableByBomb(throwerPosition: Coordinates): GameMapGridTile[] {
+        return [...this.grid.values()]
+            .filter((targetPosition) => this.isBombTargetInReach({ throwerPosition, targetPosition }));
     }
 }
 
@@ -817,7 +648,6 @@ class Agent {
     readonly wetness: number;
     readonly metaData: AgentMetaData;
     public actionService: AgentActionService;
-    public behaviorPolicy: AgentBehaviorPolicy;
 
     constructor(props: AgentProps) {
         Object.assign(this, props);
@@ -828,167 +658,465 @@ class Agent {
         Object.assign(this, props);
     }
 
-    private getAgentVerticalSpreadPosition({
-        origin,
-        gameMap,
-        alliesCount
-    }: {
-        origin: Coordinates;
-        gameMap: GameMap;
-        alliesCount: number;
-    }): Coordinates {
-        // Make n vertical groups
-        const verticalSpreadPositions = gameMap.getVerticalSpreadPositions({ origin, count: alliesCount });
+    private readonly intentPriorityHandlersRecord: Record<
+        AgentIntent,
+        (a: TurnCandidate, b: TurnCandidate) => number
+    > = {
+        kill: (a, b) => {
+            // 1. Number of kills
+            const getKills = (tc: TurnCandidate) => tc.targetDamageEvaluation?.casualties?.filter((c) => c.isKill)?.length ?? 0;
+            const aKills = getKills(a);
+            const bKills = getKills(b);
+            const killDiff = bKills - aKills;
+            if (killDiff !== 0)
+                return killDiff;
 
-        // Distribute the allies in the groups by vertical proximity
-        return verticalSpreadPositions.sort((a, b) =>
-            Math.abs(this.coordinates.y - a.y) -
-            Math.abs(this.coordinates.y - b.y)
-        )[0];
-    }
+            // Among killable targets
+            if (aKills > 0 && bKills > 0) {
+                // 2. Remove the biggest bomb threat first
+                const countSplashBombs = (tc: TurnCandidate) => tc.targetDamageEvaluation!.casualties.reduce((bombs, c) => c.agent.splashBombs, 0);
+                const bombDiff = countSplashBombs(b) - countSplashBombs(a);
+                if (bombDiff !== 0)
+                    return bombDiff;
+
+                // 3. Prefer killing w/ a shot to spare bombs
+                const getActionScore = (tc: TurnCandidate) => tc.actionType === AgentActionName.SHOOT ? 1 : 0;
+                const actionDiff = getActionScore(b) - getActionScore(a);
+                if (actionDiff !== 0)
+                    return actionDiff;
+            }
+
+            return 0;
+        },
+        'max-damage': (a, b) => {
+            // 1. Highest damage output
+            const getTotalDamageOutput = (tc: TurnCandidate) => tc.targetDamageEvaluation?.casualties?.reduce((damage, c) => damage + c.effectiveDamage, 0) ?? 0;
+            const damageOutputDiff = getTotalDamageOutput(b) - getTotalDamageOutput(a)
+            if (damageOutputDiff !== 0)
+                return damageOutputDiff;
+
+            // 2. Reduce overkill
+            const getTotalOverkillOutput = (tc: TurnCandidate) => tc.targetDamageEvaluation?.casualties?.reduce((damage, c) => damage + c.overkillWetness, 0) ?? 0;
+            const overkillOutputDiff = getTotalOverkillOutput(a) - getTotalOverkillOutput(b)
+            if (overkillOutputDiff !== 0)
+                return overkillOutputDiff;
+
+
+            // 3. Bomb carriers
+            const countSplashBombs = (tc: TurnCandidate) => tc.targetDamageEvaluation!.casualties.reduce((bombs, c) => c.agent.splashBombs, 0);
+                const bombDiff = countSplashBombs(b) - countSplashBombs(a);
+                if (bombDiff !== 0)
+                    return bombDiff;
+
+            return 0;
+        },
+        survive: (a, b) => {
+            // Avoid deathly threats
+            const countDeathlyThreats = (tc: TurnCandidate) => tc.threatsEvaluation.filter((t) => t.canKill).length;
+            return countDeathlyThreats(a) - countDeathlyThreats(b);
+        },
+        'min-injuries': (a, b) => {
+            // Reduce damage risk
+            const calculateTotalDamageRisk = (tc: TurnCandidate) => tc.threatsEvaluation.reduce((total, threat) => total + threat.biggestPotentialDamage, 0);
+            return calculateTotalDamageRisk(a) - calculateTotalDamageRisk(b);
+        },
+        territory: (a, b) => 0 // TODO: implement this
+    };
+
+    // private getAgentVerticalSpreadPosition({
+    //     origin,
+    //     gameMap,
+    //     alliesCount
+    // }: {
+    //     origin: Coordinates;
+    //     gameMap: GameMap;
+    //     alliesCount: number;
+    // }): Coordinates {
+    //     // Make n vertical groups
+    //     const verticalSpreadPositions = gameMap.getVerticalSpreadPositions({ origin, count: alliesCount });
+
+    //     // Distribute the allies in the groups by vertical proximity
+    //     return verticalSpreadPositions.sort((a, b) =>
+    //         Math.abs(this.coordinates.y - a.y) -
+    //         Math.abs(this.coordinates.y - b.y)
+    //     )[0];
+    // }
 
     /** Get the next move coordinates */
-    private getAgentNextMove({
-        formationRole,
-        gameMap,
-        allies,
-        enemies,
-        gameStrategy
-    }: {
-        formationRole: AgentBehaviorPolicy['formationRole'];
-        gameMap: GameMap;
-        allies: Agent[];
-        enemies: Agent[];
-        gameStrategy: GameStrategy
-    }): Coordinates {
-        let nextMove: Coordinates;
+    // private getAgentNextMove({
+    //     gameMap,
+    //     allies,
+    //     enemies,
+    // }: {
+    //     gameMap: GameMap;
+    //     allies: Agent[];
+    //     enemies: Agent[];
+    // }): Coordinates {
+    //     let nextMove: Coordinates;
         
-        const averageEnemiesPosition = gameMap.getAveragePosition(
-            enemies.map((enemy) => enemy.coordinates)
-        );
-        const occupiedPositions = [...allies, ...enemies].map((agent) => agent.coordinates);
+    //     const averageEnemiesPosition = gameMap.getAveragePosition(
+    //         enemies.map((enemy) => enemy.coordinates)
+    //     );
+    //     const occupiedPositions = [...allies, ...enemies].map((agent) => agent.coordinates);
 
-        switch (formationRole) {
-            case 'frontline': {
-                // === FRONTLINERS MOVE FRONTALLY TOWARDS ENEMIES CENTER ===
-                this.actionService.message(`${gameStrategy} - Pressing forward`);
+    //     // Create vertical ally groups to minimize splash damage impact
+    //     const verticalSpread = this.getAgentVerticalSpreadPosition({
+    //         origin: nextMove,
+    //         alliesCount: allies.length,
+    //         gameMap
+    //     });
 
-                nextMove = averageEnemiesPosition;
-                break;
-            } case 'harass-bomb-owners':
-                // === GO TO ENEMY WHO OWNS THE MOST BOMBS ===
-                 this.actionService.message(`${gameStrategy} - Give me your bombs`);
-                return enemies.reduce((max, enemy) => enemy.splashBombs > max.splashBombs ? enemy : max, enemies[0])?.coordinates;
-            case 'follower': {
-                // === FOLLOWERS STAY BEHIND ===
-                this.actionService.message(`${gameStrategy} - Watching your back`);
+    //     // Look for closest cover around target position
+    //     const MAX_COVER_DISTANCE_FROM_TARGET_POSITION = 3;
+    //     const closestCoverAroundTargetPosition = gameMap.evaluateCoverPosition({
+    //         maxDistance: MAX_COVER_DISTANCE_FROM_TARGET_POSITION,
+    //         position: verticalSpread,
+    //         enemies,
+    //         occupiedPositions
+    //     });
 
-                // Find next move
-                // Add distance behind attackers
-                const MIN_DISTANCE_FROM_ATTACKERS = 2;
-                const nonFollowers = allies.filter((ally) => ally.behaviorPolicy.formationRole !== 'follower');
-                const averageFrontlinePosition = (() => {
-                    if (nonFollowers.length === 0) return this.coordinates; // N.B.: should not happen, there should never be followers only
-                    if (nonFollowers.length === 1) return nonFollowers[0].coordinates;
-                    return gameMap.getAveragePosition(nonFollowers.map((attacker) => attacker.coordinates));
-                })();
-                const areEnemiesGroupAtRightOfAllies = averageFrontlinePosition.x < averageEnemiesPosition.x;
-                const behindAttackers = {
-                    x: areEnemiesGroupAtRightOfAllies ?
-                        // Add distance while keeping value in bounds
-                        Math.max(0, averageFrontlinePosition.x - MIN_DISTANCE_FROM_ATTACKERS) :
-                        Math.min(gameMap.width, averageFrontlinePosition.x + MIN_DISTANCE_FROM_ATTACKERS),
-                    y: averageEnemiesPosition.y
-                };
-
-                nextMove = behindAttackers;
-                break;
-            }
-        }
-
-        // Create vertical ally groups to minimize splash damage impact
-        const verticalSpread = this.getAgentVerticalSpreadPosition({
-            origin: nextMove,
-            alliesCount: allies.length,
-            gameMap
-        });
-
-        // Look for closest cover around target position
-        const MAX_COVER_DISTANCE_FROM_TARGET_POSITION = 3;
-        const closestCoverAroundTargetPosition = gameMap.getIdealCoverNearby({
-            maxDistance: MAX_COVER_DISTANCE_FROM_TARGET_POSITION,
-            origin: verticalSpread,
-            enemies,
-            occupiedPositions
-        });
-
-        return gameMap.findNextStepOnShortestPath({
-            target: closestCoverAroundTargetPosition,
-            origin: this.coordinates,
-            occupiedPositions
-        });
-    }
+    //     return gameMap.findNextStepOnShortestPath({
+    //         target: closestCoverAroundTargetPosition,
+    //         origin: this.coordinates,
+    //         occupiedPositions
+    //     });
+    // }
 
     /**
-     * Choose what to do depending on the current agent behavior state
-     * and execute actions
+     * Determine agent's intent priority for this turn.
+     * The intent relies on both the global tactical context and this agent's local situation
      */
+    private computeIntentPriority(): AgentIntent[] {
+        return ['kill', 'max-damage', 'territory', 'survive']; // TODO: implement method
+    }
+
+    /** Choose what to do and execute actions */
     public decideActions({
         gameMap,
         allies,
         enemies,
-        gameStrategy
     }: {
         gameMap: GameMap;
         allies: Agent[];
         enemies: Agent[];
-        gameStrategy: GameStrategy;
     }): void {
+        // Compute intent
+        const agentIntentPriority = this.computeIntentPriority();
+
+        // === SEARCH FOR IMMEDIATE OPPORTUNITIES  ===
+        const moveCandidates = gameMap.getMoveCandidates({
+            origin: this.coordinates,
+            occupiedPositions: [...allies, ...enemies].map(({ coordinates }) => coordinates) // TODO: take into account pending ally moves
+        });
+
+        // Generate move/action candidates for this turn
+        const turnCandidates: TurnCandidate[] = moveCandidates.flatMap((move) => {
+            const movedAgent = { ...this, coordinates: move };
+            const threatsEvaluation = this.evaluateThreats({ ally: movedAgent, enemies, gameMap })
+            const turnCandidateBase = { move, threatsEvaluation };
+
+            const turnCandidatesForThisMove: TurnCandidate[] = [
+                // Simulate throw actions
+                ...(
+                    this.evaluateBombTargets({
+                        thrower: movedAgent,
+                        allies,
+                        enemies,
+                        gameMap,
+                        minTouchedEnemies: 1, // TODO: use dynamic parameters ?
+                        maxTouchedAllies: 0
+                    })
+                        .map((targetDamageEvaluation): TurnCandidate => ({
+                            ...turnCandidateBase,
+                            actionType: AgentActionName.THROW,
+                            targetDamageEvaluation,
+                        }))
+                ),
+
+                // Simulate shooting actions
+                ...(
+                    this.evaluateShootingTargets({
+                        shooter: movedAgent,
+                        enemies, gameMap
+                    })
+                        .map((targetDamageEvaluation): TurnCandidate => ({
+                            ...turnCandidateBase,
+                            actionType: AgentActionName.SHOOT,
+                            targetDamageEvaluation
+                        }))
+                ),
+
+                // Hunker down
+                { ...turnCandidateBase, actionType: AgentActionName.HUNKER_DOWN, targetDamageEvaluation: undefined }
+            ];
+            return turnCandidatesForThisMove;
+        });
+
+        // Find most relevant opportunity to the current intent
+        const intentPriorityHandlers = agentIntentPriority.map((intent) => this.intentPriorityHandlersRecord[intent]);
+        const bestImmediateOpportunity = turnCandidates.sort((a, b) => {
+            for (const intentPriorityHandler of intentPriorityHandlers) {
+                const result = intentPriorityHandler(a, b);
+                if (result !== 0) return result;
+            }
+
+            return 0;
+        })[0];
+        
+        // No immediate opportunity found => search for an ideal destination
+
+
         // === MOVE ACTION ===
-        const nextMove = this.getAgentNextMove({
-            formationRole: this.behaviorPolicy.formationRole,
-            gameMap,
-            allies,
-            enemies,
-            gameStrategy
-        });
-        this.actionService.move({
-            currentPosition: this.coordinates,
-            targetPosition: nextMove
-        });
+        // const nextMove = this.getAgentNextMove({
+        //     gameMap,
+        //     allies,
+        //     enemies,
+        // });
+        // this.actionService.move({
+        //     currentPosition: this.coordinates,
+        //     targetPosition: nextMove
+        // });
 
-        // === BATTLE ACTION ===
-        // Register battle actions from lowest to highest priority.
-        // ActionService keeps only the last registered battle action.
+        // // === BATTLE ACTION ===
+        // // Register battle actions from lowest to highest priority.
+        // // ActionService keeps only the last registered battle action.
 
-        // 3rd priority: hunker down by default (potentially overridden by further action via actionService)
-        this.actionService.hunkerDown();
+        // // 3rd priority: hunker down by default (potentially overridden by further action via actionService)
+        // this.actionService.hunkerDown();
 
-        // 2nd priority: try to shoot
-        const canShoot = this.cooldown === 0;
-        if (canShoot) {
-            const idealShootTarget = gameMap.getIdealShootTarget({
-                shooter: this,
-                enemies: enemies,
-            });
-            if (idealShootTarget) this.actionService.shoot(idealShootTarget.agentId);
-        }
+        // // 2nd priority: try to shoot
+        // const canShoot = this.cooldown === 0;
+        // if (canShoot) {
+        //     const idealShootTarget = gameMap.getIdealShootTarget({
+        //         shooter: this,
+        //         enemies: enemies,
+        //     });
+        //     if (idealShootTarget) this.actionService.shoot(idealShootTarget.agentId);
+        // }
 
-        // 1st priority: try to throw a bomb
-        const hasBombs = this.splashBombs > 0;
-        if (hasBombs) {
-            const idealBombTarget = gameMap.getIdealBombTarget({
-                thrower: this,
-                allies: allies,
-                enemies: enemies,
-                maxTouchedAllies: this.behaviorPolicy.bombPolicy.allowFriendlyFire ? 1 : 0,
-                minTouchedEnemies: this.behaviorPolicy.bombPolicy.requireEnemyCluster ? 2 : 1
-            });
-            if (idealBombTarget) this.actionService.throw(idealBombTarget);
-        }
+        // // 1st priority: try to throw a bomb
+        // const hasBombs = this.splashBombs > 0;
+        // if (hasBombs) {
+        //     const idealBombTarget = gameMap.getIdealBombTarget({
+        //         thrower: this,
+        //         allies: allies,
+        //         enemies: enemies,
+        //         maxTouchedAllies: this.behaviorPolicy.bombPolicy.allowFriendlyFire ? 1 : 0,
+        //         minTouchedEnemies: this.behaviorPolicy.bombPolicy.requireEnemyCluster ? 2 : 1
+        //     });
+        //     if (idealBombTarget) this.actionService.throw(idealBombTarget);
+        // }
 
         // Execute actions
         this.actionService.executeActions();
+    }
+
+    private evaluateCasualty({
+        agent,
+        isEnemy,
+        effectiveDamage
+    }: {
+        agent: Agent;
+        isEnemy: boolean;
+        effectiveDamage: number;
+    }): TargetDamageCasualty {
+        const AGENT_FULL_HEALTH = 100;
+        const resultingWetness = agent.wetness + effectiveDamage;
+        return {
+            agent,
+            isEnemy,
+            effectiveDamage,
+            ceiledResultingWetness: Math.min(AGENT_FULL_HEALTH, resultingWetness),
+            isKill: resultingWetness >= AGENT_FULL_HEALTH,
+            overkillWetness: Math.max(0, resultingWetness - AGENT_FULL_HEALTH)
+        }
+    }
+
+    // ======================================================================
+    // BOMBS
+    // ======================================================================
+    private evaluateBombTargets({
+        gameMap,
+        thrower,
+        allies,
+        enemies,
+        minTouchedEnemies,
+        maxTouchedAllies
+    }: {
+        gameMap: GameMap;
+        thrower: Agent;
+        allies: Agent[];
+        enemies: Agent[];
+        minTouchedEnemies: number;
+        maxTouchedAllies:  number;
+    }): TargetDamageEvaluation[] {
+        if (this.splashBombs === 0) return []; // Thrower does not carry any bombs
+
+        return gameMap.getAreaReachableByBomb(thrower.coordinates).map((target) => {
+            // Look for casualties within the splash zone and evaluate damage
+            const casualties: TargetDamageCasualty[] = [];
+            const agentLists = [
+                { isEnemy: false, agents: allies }, 
+                { isEnemy: true, agents: enemies }
+            ];
+            const splashZone = gameMap.getSplashZone(target);
+
+            splashZone.forEach((tile) => {
+                agentLists.forEach(({ isEnemy, agents }) => {
+                    agents.forEach((agent) => {
+                        if (!gameMap.isSamePosition(agent.coordinates, tile)) return;
+
+                        // Agent is within splashzone
+                        const BOMB_DAMAGE = 30; // should be defined in the Game class, but we'll simplify
+                        casualties.push(this.evaluateCasualty({
+                            agent,
+                            isEnemy,
+                            effectiveDamage: BOMB_DAMAGE
+                        }));
+                    });
+                });
+            });
+
+            const damageEvaluation: TargetDamageEvaluation = {
+                targetPosition: target,
+                casualties
+            };
+            return damageEvaluation;
+        })
+        .filter(({ casualties }) =>
+            // Skip bomb targets that would affect more than 1 ally
+            casualties.filter(({ isEnemy }) => !isEnemy).length <= maxTouchedAllies &&
+            // 'Touch 1 or more enemies' requirement
+            casualties.filter(({ isEnemy }) => isEnemy).length >= minTouchedEnemies
+        )
+        // .sort((a, b) => {
+        //     // Priority 1: hit the most enemies
+        //     const touchedDiff = b.touchedEnemiesCount - a.touchedEnemiesCount;
+        //     if (touchedDiff !== 0)
+        //         return touchedDiff;
+
+        //     // Priority 2: kill enemies
+        //     const killDiff = b.killableEnemiesCount - a.killableEnemiesCount;
+        //     if (killDiff !== 0)
+        //         return killDiff; 
+            
+        //     // Priority 3: remove the highest bomb threat
+        //     const bombDiff = b.touchedEnemyBombs - a.touchedEnemyBombs;
+        //     if (bombDiff !== 0)
+        //         return bombDiff;
+
+        //     // Minimize number of touched allies
+        //     return a.touchedAlliesCount - b.touchedAlliesCount;
+        // })
+        // [0];
+    }
+
+    // ======================================================================
+    // SHOOTING
+    // ======================================================================
+    /**
+     * N.B.: the enemy can still hunker down, which seems to be unpredictable.
+     * TODO: most enemies are likely hunker down if they are under cooldown and don't have a throw opportunity ?
+     * */
+    private estimateEffectiveShootingDamage ({
+        shooter,
+        shooterTarget,
+        gameMap
+    }: {
+        shooter: Agent;
+        shooterTarget: Agent;
+        gameMap: GameMap;
+    }): number {
+        const distanceFromShooter = gameMap.getManhattanDistance(shooterTarget.coordinates, shooter.coordinates);
+        const baseDamage = (() => {
+            if (distanceFromShooter <= shooter.metaData.optimalRange) return shooter.metaData.soakingPower;
+            if (distanceFromShooter <= shooter.metaData.optimalRange * 2) return shooter.metaData.soakingPower / 2;
+            return 0;
+        })();
+
+        const targetCover = gameMap.calculateProtectionTypeAgainstShooter({ shooter, shooterTarget });
+        switch (targetCover) {
+            case TileType.HIGH_COVER: return baseDamage * 3/4;
+            case TileType.LOW_COVER: return baseDamage / 2;
+            default: return baseDamage;
+        }
+    }
+
+    private evaluateShootingTargets({
+        enemies,
+        shooter,
+        gameMap
+    }: {
+        enemies: Agent[];
+        shooter: Agent;
+        gameMap: GameMap;
+    }): TargetDamageEvaluation[] {
+        if (this.cooldown > 0) return []; // Shooter is not ready to shoot now
+
+        return enemies
+            .filter((enemy) => {
+                // Do not consider targets that are out of range
+                const maxRange = shooter.metaData.optimalRange * 2;
+                return gameMap.getManhattanDistance(shooter.coordinates, enemy.coordinates) <= maxRange;
+            })
+            .map((enemy) => {
+                const effectiveDamage = this.estimateEffectiveShootingDamage({ shooter, shooterTarget: enemy, gameMap });
+                return {
+                    targetPosition: enemy.coordinates,
+                    casualties: [this.evaluateCasualty({ agent: enemy, isEnemy: true, effectiveDamage })]
+                }
+            })
+            // .sort((a, b) => {
+            //     // 1. Kill priority
+            //     const killDiff = Number(b.canKill) - Number(a.canKill);
+            //     if (killDiff !== 0)
+            //         return killDiff;
+
+            //     // 2. Among killable targets, remove the biggest bomb threat first
+            //     if (a.canKill && b.canKill) {
+            //         const bombDiff = b.enemy.splashBombs - a.enemy.splashBombs;
+            //         if (bombDiff !== 0)
+            //             return bombDiff;
+            //     }
+
+            //     // 3. Highest damage output
+            //     const damageOutputDiff =
+            //         (b.enemy.wetness + b.effectiveDamage) -
+            //         (a.enemy.wetness + a.effectiveDamage);
+            //     if (damageOutputDiff !== 0)
+            //         return damageOutputDiff;
+
+            //     // 4. Remaining tie-breaker: bomb carriers
+            //     return b.enemy.splashBombs - a.enemy.splashBombs;
+            // })
+    }
+
+    // ======================================================================
+    // THREATS
+    // ======================================================================
+    private evaluateThreats({
+        ally,
+        enemies,
+        gameMap
+    }: {
+        ally: Agent;
+        enemies: Agent[];
+        gameMap: GameMap;
+    }): ThreatEvaluation[] {
+        return enemies.map((enemy) => {
+            const BOMB_DAMAGE = 30;
+            const AGENT_FULL_HEALTH = 100;
+
+            const canEnemyThrowBomb = enemy.splashBombs > 0 && gameMap.isBombTargetInReach({ throwerPosition: enemy.coordinates, targetPosition: ally.coordinates });
+
+            const biggestPotentialDamage = Math.max(
+                this.estimateEffectiveShootingDamage({ shooter: enemy, shooterTarget: ally, gameMap }),
+                canEnemyThrowBomb ? BOMB_DAMAGE : 0
+            );
+            const canKill = ally.wetness + biggestPotentialDamage >= AGENT_FULL_HEALTH;
+
+            return { agent: enemy, biggestPotentialDamage, canKill };
+        });
     }
 };
 
