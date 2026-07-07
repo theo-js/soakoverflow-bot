@@ -813,7 +813,9 @@ class Agent {
         // === SEARCH FOR IMMEDIATE OPPORTUNITIES  ===
         const moveCandidates = gameMap.getMoveCandidates({
             origin: this.coordinates,
-            occupiedPositions: [...allies, ...enemies].map(({ coordinates }) => coordinates) // TODO: take into account pending ally moves
+            occupiedPositions: [...allies, ...enemies]
+                .filter(({ agentId }) => agentId !== this.agentId) // Exclude current agent from occupied positions to allow staying on place
+                .map(({ coordinates }) => coordinates) // TODO: take into account pending ally moves
         });
 
         // Generate move/action candidates for this turn
