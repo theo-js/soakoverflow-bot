@@ -51,7 +51,7 @@ type ThreatEvaluation = {
     agent: Agent;
     biggestPotentialDamage: number;
     canKill: boolean;
-}0
+};
 type TargetDamageEvaluation = {
     targetPosition: Coordinates;
     casualties: TargetDamageCasualty[];
