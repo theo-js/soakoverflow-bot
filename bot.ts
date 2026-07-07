@@ -877,10 +877,13 @@ class Agent {
         switch(bestImmediateOpportunity.actionType) {
             case AgentActionName.SHOOT:
                 this.actionService.shoot(bestImmediateOpportunity.targetDamageEvaluation.casualties[0]!.agent.agentId);
+                break;
             case AgentActionName.THROW:
                 this.actionService.throw(bestImmediateOpportunity.targetDamageEvaluation.targetPosition);
+                break;
             case AgentActionName.HUNKER_DOWN:
                 this.actionService.hunkerDown();
+                break;
         }
 
         this.actionService.executeActions();
