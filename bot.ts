@@ -1434,7 +1434,6 @@ class AgentActionService {
         }
 
         // Execute registered actions then flush
-
         console.log(
             [
                 this.agentId,
