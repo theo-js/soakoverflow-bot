@@ -1128,7 +1128,7 @@ class Agent {
 
             // Pick the turnCandidate that matches next step to the destination
             const candidatesForPathMove = sortedTurnCandidates.filter((tc) => gameMap.isSamePosition(tc.move, pathMove));
-            chosenTurnCandidate = sortByIntentPriority(candidatesForPathMove)[0];
+            chosenTurnCandidate = candidatesForPathMove[0];
         }
 
         // === EXECUTE ACTIONS ===
